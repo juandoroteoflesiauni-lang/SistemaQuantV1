@@ -10,6 +10,7 @@ import numpy as np
 import os
 import toml
 import sqlite3
+import math
 from datetime import datetime
 from scipy.signal import argrelextrema 
 from sklearn.model_selection import train_test_split
@@ -45,12 +46,14 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN PÁGINA ---
-st.set_page_config(page_title="Sistema Quant V42 (Macro)", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Sistema Quant V43 (Accountant)", layout="wide", page_icon="💎")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
     .signal-box {border: 2px solid #FFD700; padding: 10px; border-radius: 5px; background-color: #2b2b00; text-align: center;}
     .macro-card {background-color: #1e2130; padding: 10px; border-radius: 5px; text-align: center; border: 1px solid #444;}
+    .undervalued {color: #00ff00; font-weight: bold;}
+    .overvalued {color: #ff0000; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -104,140 +107,118 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR MACRO & ALPHA (NUEVO V42) ---
+# --- MOTOR CONTABLE & VALUACIÓN (NUEVO V43) ---
+@st.cache_data(ttl=3600)
+def calcular_valor_intrinseco(ticker):
+    """Calcula el Valor Intrínseco usando Graham y Peter Lynch"""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # Datos Clave
+        precio_actual = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+        eps = info.get('trailingEps') # Ganancia por acción
+        book_value = info.get('bookValue') # Valor libros por acción
+        pe_ratio = info.get('trailingPE') 
+        growth_rate = info.get('earningsGrowth', 0) * 100 # Crecimiento estimado %
+        
+        # 1. FÓRMULA DE BENJAMIN GRAHAM
+        # V = Raíz(22.5 * EPS * ValorLibro)
+        graham_number = 0
+        if eps and book_value and eps > 0 and book_value > 0:
+            graham_number = math.sqrt(22.5 * eps * book_value)
+            
+        # 2. VALOR JUSTO PETER LYNCH
+        # Valor Justo = EPS * (Crecimiento Esperado + Dividend Yield) 
+        # Simplificado: Si el P/E es igual a la tasa de crecimiento, es precio justo (PEG = 1)
+        lynch_value = 0
+        if eps and growth_rate and growth_rate > 0:
+            # Lynch solía decir que una empresa que crece al 20% debería tener un P/E de 20
+            lynch_value = eps * growth_rate 
+
+        # Diagnóstico
+        status_graham = "N/A"
+        if graham_number > 0:
+            diff_graham = ((graham_number - precio_actual) / precio_actual) * 100
+            status_graham = "INFRAVALORADA 🟢" if graham_number > precio_actual else "SOBREVALORADA 🔴"
+        
+        return {
+            "Precio": precio_actual,
+            "Graham": graham_number,
+            "Lynch": lynch_value,
+            "Status_Graham": status_graham,
+            "Diff_Graham": diff_graham if graham_number > 0 else 0,
+            "PER": pe_ratio,
+            "Growth": growth_rate,
+            "EPS": eps,
+            "BookValue": book_value
+        }
+    except Exception as e: return None
+
+# --- MOTORES EXISTENTES ---
 def obtener_datos_macro():
-    """Descarga datos rápidos de indicadores económicos"""
     tickers = list(MACRO_TICKERS.values())
     try:
         df = yf.download(" ".join(tickers), period="2d", progress=False, group_by='ticker', auto_adjust=True)
         res = {}
         for name, tick in MACRO_TICKERS.items():
             try:
-                if len(tickers) > 1:
-                    price = df[tick]['Close'].iloc[-1]
-                    prev = df[tick]['Close'].iloc[-2]
-                else:
-                    price = df['Close'].iloc[-1]
-                    prev = df['Close'].iloc[-2]
-                
-                delta = ((price - prev) / prev) * 100
-                res[name] = (price, delta)
+                if len(tickers) > 1: price = df[tick]['Close'].iloc[-1]; prev = df[tick]['Close'].iloc[-2]
+                else: price = df['Close'].iloc[-1]; prev = df['Close'].iloc[-2]
+                delta = ((price - prev) / prev) * 100; res[name] = (price, delta)
             except: res[name] = (0, 0)
         return res
     except: return None
 
-def calcular_alpha_beta(ticker, benchmark='SPY', period="1y"):
-    """Compara una acción contra el mercado"""
+def calcular_alpha_beta(ticker, benchmark='SPY'):
     try:
-        data = yf.download(f"{ticker} {benchmark}", period=period, progress=False, auto_adjust=True)['Close']
+        data = yf.download(f"{ticker} {benchmark}", period="1y", progress=False, auto_adjust=True)['Close']
         if data.empty: return None, None
-        
-        # Calcular retornos diarios
-        returns = data.pct_change().dropna()
-        
-        # Separar activo y mercado
-        if ticker == benchmark: return pd.DataFrame(), {"Beta": 1.0, "Alpha": 0.0}
-        
-        stock_ret = returns[ticker]
-        market_ret = returns[benchmark]
-        
-        # 1. Calcular Beta (Covarianza / Varianza Mercado)
-        covariance = stock_ret.cov(market_ret)
-        variance = market_ret.var()
-        beta = covariance / variance
-        
-        # 2. Calcular Alpha (Rendimiento acumulado vs Mercado)
-        # Normalizamos a base 100 para graficar
-        norm_data = (data / data.iloc[0]) * 100
-        
-        # Resultado final acumulado
-        total_ret_stock = (norm_data[ticker].iloc[-1] - 100)
-        total_ret_market = (norm_data[benchmark].iloc[-1] - 100)
-        alpha = total_ret_stock - total_ret_market
-        
-        metrics = {"Beta": beta, "Alpha Total %": alpha, "Retorno Activo": total_ret_stock, "Retorno Mercado": total_ret_market}
-        
-        return norm_data, metrics
+        ret = data.pct_change().dropna()
+        cov = ret[ticker].cov(ret[benchmark]); var = ret[benchmark].var(); beta = cov/var
+        norm = (data/data.iloc[0])*100
+        alpha = (norm[ticker].iloc[-1]-100) - (norm[benchmark].iloc[-1]-100)
+        return norm, {"Beta": beta, "Alpha Total %": alpha}
     except: return None, None
 
-# --- MOTORES EXISTENTES ---
-def simular_montecarlo(ticker, dias_proyeccion=30, simulaciones=500):
+def simular_montecarlo(ticker, dias=30, sims=500):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)['Close']
-        if df.empty: return None, None
-        log_returns = np.log(1 + df.pct_change())
-        u = log_returns.mean().item(); var = log_returns.var().item()
-        drift = u - (0.5 * var); stdev = log_returns.std().item(); last_price = df.iloc[-1].item()
-        daily_returns = np.exp(drift + stdev * norm.ppf(np.random.rand(dias_proyeccion, simulaciones)))
-        price_list = np.zeros_like(daily_returns); price_list[0] = last_price
-        for t in range(1, dias_proyeccion): price_list[t] = price_list[t - 1] * daily_returns[t]
+        log_ret = np.log(1+df.pct_change()); u = log_ret.mean().item(); var = log_ret.var().item()
+        drift = u - (0.5*var); stdev = log_ret.std().item(); last = df.iloc[-1].item()
+        daily_ret = np.exp(drift + stdev * norm.ppf(np.random.rand(dias, sims)))
+        price_list = np.zeros_like(daily_ret); price_list[0] = last
+        for t in range(1, dias): price_list[t] = price_list[t-1]*daily_ret[t]
         fig = go.Figure()
-        for i in range(min(50, simulaciones)): fig.add_trace(go.Scatter(y=price_list[:, i], mode='lines', line=dict(width=1, color='rgba(0, 255, 255, 0.1)'), showlegend=False))
-        mean_prices = np.mean(price_list, axis=1)
-        fig.add_trace(go.Scatter(y=mean_prices, mode='lines', line=dict(width=3, color='yellow'), name='Promedio'))
+        for i in range(min(50, sims)): fig.add_trace(go.Scatter(y=price_list[:, i], mode='lines', line=dict(width=1, color='rgba(0,255,255,0.1)'), showlegend=False))
+        mean = np.mean(price_list, axis=1)
+        fig.add_trace(go.Scatter(y=mean, mode='lines', line=dict(width=3, color='yellow'), name='Promedio'))
         p95 = np.percentile(price_list, 95, axis=1); p05 = np.percentile(price_list, 5, axis=1)
-        fig.add_trace(go.Scatter(y=p95, mode='lines', line=dict(width=1, color='green', dash='dash'), name='Optimista (95%)'))
-        fig.add_trace(go.Scatter(y=p05, mode='lines', line=dict(width=1, color='red', dash='dash'), name='Pesimista (5%)'))
-        fig.update_layout(title=f"Montecarlo: {ticker}", template="plotly_dark", height=400)
-        res = {"ultimo_precio": last_price, "esperado": mean_prices[-1], "optimista": p95[-1], "pesimista": p05[-1]}
-        return fig, res
-    except Exception as e: return None, str(e)
+        fig.add_trace(go.Scatter(y=p95, mode='lines', line=dict(width=1, color='green', dash='dash'), name='Optimista')); fig.add_trace(go.Scatter(y=p05, mode='lines', line=dict(width=1, color='red', dash='dash'), name='Pesimista'))
+        fig.update_layout(title=f"Montecarlo {ticker}", template="plotly_dark", height=400)
+        return fig, {"esperado": mean[-1], "pesimista": p05[-1]}
+    except: return None, None
 
 @st.cache_data(ttl=600)
 def generar_mapa_calor(tickers):
     try:
         data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
-        if data.empty: return None
-        pct_change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
-        df_map = pd.DataFrame({'Ticker': pct_change.index, 'Variacion': pct_change.values, 'Precio': data.iloc[-1].values})
+        pct = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        df = pd.DataFrame({'Ticker': pct.index, 'Variacion': pct.values, 'Precio': data.iloc[-1].values})
         sectores = []
-        for t in df_map['Ticker']:
+        for t in df['Ticker']:
             if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sectores.append('Tecnología')
             elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sectores.append('Cripto')
             elif t in ['SPY', 'QQQ', 'DIA']: sectores.append('Índices')
             elif t in ['GLD', 'USO']: sectores.append('Commodities')
             else: sectores.append('Otros')
-        df_map['Sector'] = sectores; df_map['Size'] = df_map['Precio'] 
-        return df_map
+        df['Sector'] = sectores; df['Size'] = df['Precio'] 
+        return df
     except: return None
 
-def calcular_riesgo_portafolio(df_pos):
-    if df_pos.empty: return None, None, None
-    tk = df_pos['Ticker'].tolist(); w = (df_pos['Valor Mercado']/df_pos['Valor Mercado'].sum()).values
-    try:
-        d = yf.download(" ".join(tk), period="1y", progress=False, auto_adjust=True)['Close']
-        if len(tk)==1: d = d.to_frame(name=tk[0])
-        ret = np.log(d/d.shift(1)).dropna(); cov = ret.cov()*252; vol = np.sqrt(np.dot(w.T, np.dot(cov, w)))
-        var = df_pos['Valor Mercado'].sum() * (vol/np.sqrt(252)) * 1.65
-        return var, vol, ret.corr()
-    except: return None, None, None
-
-@st.cache_data(ttl=300)
-def escanear_oportunidades(tickers):
-    señales = []
-    try: data = yf.download(" ".join(tickers), period="3mo", interval="1d", group_by='ticker', progress=False, auto_adjust=True)
-    except: return pd.DataFrame()
-    for t in tickers:
-        try:
-            if len(tickers) > 1:
-                try: df = data[t].copy()
-                except: continue
-            else: df = data.copy()
-            df = df.dropna()
-            if len(df) < 20: continue
-            if 'Close' not in df.columns and df.shape[1] >= 4: df.columns = ['Open', 'High', 'Low', 'Close', 'Volume'][:df.shape[1]]
-            last_close = df['Close'].iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
-            bb = ta.bbands(df['Close'], length=20, std=2); lower = bb.iloc[-1, 0]; upper = bb.iloc[-1, 2]
-            tipo = "NEUTRAL"; fuerza = 0
-            if last_close < lower: tipo = "COMPRA BOL 🟢"; fuerza = 90
-            elif last_close > upper: tipo = "VENTA BOL 🔴"; fuerza = 80
-            elif rsi < 30: tipo = "COMPRA RSI 🟢"; fuerza += 70
-            elif rsi > 70: tipo = "VENTA RSI 🔴"; fuerza += 70
-            if tipo != "NEUTRAL": señales.append({"Ticker": t, "Señal": tipo, "Fuerza": fuerza})
-        except: pass
-    return pd.DataFrame(señales)
-
+# --- GRAFICO Y BACKTEST ORIGINALES ---
 def graficar_master(ticker):
+    # (Código V36 completo mantenido, resumido aquí para visualización)
     try:
         stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True)
         if df.empty: return None
@@ -249,7 +230,7 @@ def graficar_master(ticker):
         res = sorted([r for r in highs[max_idx] if 0 < (r - df['Close'].iloc[-1])/df['Close'].iloc[-1] < 0.15])[:2]
         sop = sorted([s for s in lows[min_idx] if 0 < (df['Close'].iloc[-1] - s)/df['Close'].iloc[-1] < 0.15])[-2:]
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
         if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
         try: fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1); fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
         except: pass
@@ -289,22 +270,16 @@ def ejecutar_backtest_pro(ticker, capital, estrategia, params):
     except: return None
 
 # --- INTERFAZ ---
-st.title("🌍 Sistema Quant V42: Macro & Alpha")
+st.title("💎 Sistema Quant V43: The Accountant")
 
-# 1. CINTA MACROECONÓMICA (NUEVO V42)
+# 1. CINTA MACRO
 macro_data = obtener_datos_macro()
 if macro_data:
     cols = st.columns(len(macro_data))
     for idx, (name, (price, delta)) in enumerate(macro_data.items()):
         color = "red" if delta < 0 else "green"
-        if name == "VIX (Miedo)": color = "green" if delta < 0 else "red" # VIX al revés
-        cols[idx].markdown(f"""
-            <div class='macro-card'>
-                <small>{name}</small><br>
-                <b>{price:,.2f}</b><br>
-                <span style='color:{color}'>{delta:+.2f}%</span>
-            </div>
-        """, unsafe_allow_html=True)
+        if name == "VIX (Miedo)": color = "green" if delta < 0 else "red"
+        cols[idx].markdown(f"<div class='macro-card'><small>{name}</small><br><b>{price:,.2f}</b><br><span style='color:{color}'>{delta:+.2f}%</span></div>", unsafe_allow_html=True)
 st.divider()
 
 # 2. PANEL PRINCIPAL
@@ -318,10 +293,8 @@ with c_left:
     st.markdown("### 🏦 Mi Portafolio")
     df_pos = auditar_posiciones_sql()
     if not df_pos.empty:
-        total_pnl = df_pos['P&L ($)'].sum()
-        st.metric("P&L Total", f"${total_pnl:+.2f}", delta_color="normal")
-        with st.expander("Ver Detalles"):
-            st.dataframe(df_pos[['Ticker', 'Cantidad', 'P&L ($)']])
+        st.metric("P&L Total", f"${df_pos['P&L ($)'].sum():+.2f}", delta_color="normal")
+        st.dataframe(df_pos[['Ticker', 'P&L (%)']])
 
     with st.expander("📝 Operar"):
         op_tk = st.selectbox("Ticker", WATCHLIST, key='op_tk')
@@ -329,58 +302,68 @@ with c_left:
         op_qty = st.number_input("Qty", 1, 1000)
         op_px = st.number_input("Precio", 0.0)
         if st.button("Ejecutar"):
-            registrar_operacion_sql(op_tk, op_type, op_qty, op_px)
-            st.rerun()
+            registrar_operacion_sql(op_tk, op_type, op_qty, op_px); st.rerun()
 
 with c_right:
-    tabs = st.tabs(["🆚 Alpha vs SPY", "🔮 Monte Carlo", "📈 Gráfico", "🔥 Heatmap", "♟️ Backtest"])
+    tabs = st.tabs(["💎 Valuación", "🆚 Alpha", "🔮 Monte Carlo", "📈 Gráfico", "🔥 Heatmap"])
     
-    # PESTAÑA 1: ALPHA VS BENCHMARK (NUEVO V42)
+    # PESTAÑA 1: VALUACIÓN FUNDAMENTAL (NUEVA V43)
     with tabs[0]:
-        st.subheader(f"🆚 Rendimiento Relativo: {tk} vs S&P 500")
-        with st.spinner("Calculando Beta y Alpha..."):
-            norm_data, metrics = calcular_alpha_beta(tk)
+        st.subheader(f"💎 Análisis Fundamental: {tk}")
+        st.write("¿Está la empresa barata o cara según sus libros contables?")
+        
+        with st.spinner(f"Analizando balances de {tk}..."):
+            val_data = calcular_valor_intrinseco(tk)
             
-            if norm_data is not None:
-                # Métricas Clave
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Beta (Volatilidad)", f"{metrics['Beta']:.2f}", help=">1: Más agresivo que mercado. <1: Más defensivo.")
-                m2.metric("Alpha (Exceso)", f"{metrics['Alpha Total %']:.2f}%", help="Cuánto le ganaste al mercado.", delta_color="normal")
-                m3.metric(f"Retorno {tk}", f"{metrics['Retorno Activo']:.1f}%")
-                m4.metric("Retorno SPY", f"{metrics['Retorno Mercado']:.1f}%")
+            if val_data:
+                col_v1, col_v2 = st.columns(2)
                 
-                # Gráfico Comparativo
-                fig_comp = px.line(norm_data, x=norm_data.index, y=norm_data.columns, title="Carrera de Rendimiento (Base 100)")
-                st.plotly_chart(fig_comp, use_container_width=True)
-                
-                if metrics['Beta'] > 1.2: st.warning("⚠️ Acción muy volátil (Alto riesgo).")
-                if metrics['Alpha Total %'] > 0: st.success(f"🏆 ¡{tk} está batiendo al mercado!")
-                else: st.error(f"📉 {tk} está perdiendo contra el índice.")
+                with col_v1:
+                    st.metric("Precio de Mercado", f"${val_data['Precio']:.2f}")
+                    st.metric("Valor Graham (Activos)", f"${val_data['Graham']:.2f}", 
+                              f"{val_data['Diff_Graham']:.1f}% vs Precio", 
+                              delta_color="normal") # Verde si Graham > Precio
+                    
+                    if val_data['Status_Graham'] == "INFRAVALORADA 🟢":
+                        st.success(f"Según Graham, {tk} está BARATA (Margen de Seguridad).")
+                    else:
+                        st.error(f"Según Graham, {tk} está CARA (Posible Burbuja).")
+                        
+                with col_v2:
+                    st.markdown("#### Ratios Clave")
+                    st.write(f"**PER (P/E Ratio):** {val_data['PER']}")
+                    st.write(f"**EPS (Ganancia x Acción):** ${val_data['EPS']}")
+                    st.write(f"**Valor Libro:** ${val_data['BookValue']}")
+                    st.write(f"**Crecimiento Esperado:** {val_data['Growth']:.2f}%")
+                    
+                    if val_data['Lynch'] > 0:
+                        st.metric("Valor Justo (Peter Lynch)", f"${val_data['Lynch']:.2f}", help="Basado en crecimiento")
+
+            else:
+                st.warning("No se pudieron obtener datos fundamentales completos para este activo (quizás es un ETF o Crypto).")
 
     with tabs[1]:
+        # (Código Alpha V42)
+        norm_data, metrics = calcular_alpha_beta(tk)
+        if norm_data is not None:
+            c1, c2 = st.columns(2)
+            c1.metric("Beta", f"{metrics['Beta']:.2f}")
+            c2.metric("Alpha", f"{metrics['Alpha Total %']:.2f}%")
+            fig_comp = px.line(norm_data, x=norm_data.index, y=norm_data.columns, title="Rendimiento Relativo")
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+    with tabs[2]:
         dias_mc = st.slider("Días", 10, 90, 30)
         if st.button("🎲 Simular"):
             fig_mc, res_mc = simular_montecarlo(tk, dias_mc)
-            if fig_mc:
-                c1, c2 = st.columns(2)
-                c1.metric("Esperado", f"${res_mc['esperado']:.2f}")
-                c2.metric("Riesgo", f"${res_mc['pesimista']:.2f}")
-                st.plotly_chart(fig_mc, use_container_width=True)
+            if fig_mc: st.plotly_chart(fig_mc, use_container_width=True)
 
-    with tabs[2]:
+    with tabs[3]:
         fig = graficar_master(tk)
         if fig: st.plotly_chart(fig, use_container_width=True)
         
-    with tabs[3]:
+    with tabs[4]:
         df_map = generar_mapa_calor(WATCHLIST)
         if df_map is not None:
             fig_map = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
             st.plotly_chart(fig_map, use_container_width=True)
-            
-    with tabs[4]:
-        res = ejecutar_backtest_pro(tk, cap, "Bollinger (600% Mode)", {})
-        if res:
-            c1, c2 = st.columns(2)
-            c1.metric("Retorno", f"{res['retorno']:.1f}%")
-            c2.metric("B&H", f"{res['buy_hold']:.1f}%")
-            st.line_chart(res['equity_curve'])
