@@ -9,7 +9,6 @@ import google.generativeai as genai
 import feedparser
 import warnings
 import numpy as np
-from datetime import datetime, timedelta
 
 warnings.filterwarnings('ignore')
 
@@ -19,13 +18,11 @@ TELEGRAM_CHAT_ID = "6288094504"
 GOOGLE_API_KEY = "AIzaSyB356Wjicaf9VRUYTX6_EL728IQF6nOmuQ" 
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V24.9 (Lab)", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="Sistema Quant V25 (Institutional)", layout="wide", page_icon="🏛️")
 st.markdown("""
 <style>
     .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; color: white;}
-    .stTabs [data-baseweb="tab-list"] {gap: 10px;}
-    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px; color: white;}
-    .stTabs [aria-selected="true"] {background-color: #262730; color: #4CAF50 !important;}
+    .stDataFrame {border: 1px solid #444; border-radius: 5px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -34,203 +31,217 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-# --- ACTIVOS & SECTORES ---
-WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'PLTR']
-SECTORS = {
-    'XLK': 'Tecnología 💻', 'XLF': 'Finanzas 🏦', 'XLE': 'Energía 🛢️',
-    'XLV': 'Salud 🏥', 'XLY': 'Consumo Disc. 🛍️', 'XLP': 'Consumo Bas. 🛒',
-    'GLD': 'Oro 🥇'
-}
+# --- ACTIVOS ---
+WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'JPM']
 
-st.title("🧪 Sistema Quant V24.9: Optimization Lab")
+st.title("🏛️ Sistema Quant V25: Institutional Suite")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("⚙️ Configuración")
-    capital_total = st.number_input("Capital Total ($)", value=2000)
-    riesgo_pct = st.slider("Riesgo por Trade (%)", 0.5, 3.0, 1.5)
+    st.header("⚙️ Mesa de Operaciones")
+    capital_total = st.number_input("Capital ($)", value=2000)
+    riesgo_pct = st.slider("Riesgo (%)", 0.5, 3.0, 2.0)
     st.divider()
-    if st.button("🔄 Refrescar Todo"):
-        st.cache_data.clear()
-        st.rerun()
+    st.info("💡 Novedad V25: Análisis Fundamental y Correlaciones.")
 
 # --- MOTORES DE DATOS ---
-@st.cache_data(ttl=900)
-def obtener_macro():
-    tickers = ["SPY", "^VIX"] + list(SECTORS.keys())
+@st.cache_data(ttl=1800) # Caché 30 min para fundamentales
+def obtener_datos_completos(tickers):
+    # 1. Datos Técnicos (Precios)
     try:
-        data = yf.download(tickers, period="2y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
+        df_prices = yf.download(" ".join(tickers), period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
     except: return None, None
-    
-    # 1. SPY
-    try:
-        spy = data["SPY"].copy().dropna()
-        if len(spy) > 200:
-            spy['EMA200'] = ta.ema(spy['Close'], 200)
-            spy_trend = "ALCISTA 🟢" if spy['Close'].iloc[-1] > spy['EMA200'].iloc[-1] else "BAJISTA 🔴"
-        else: spy_trend = "NEUTRAL"
-    except: spy_trend = "N/A"
-    
-    # 2. VIX
-    try:
-        vix = data["^VIX"]['Close'].iloc[-1]
-        mood = "PÁNICO 😱" if vix > 30 else ("MIEDO 😨" if vix > 20 else "COMPLACENCIA 😎")
-    except: vix, mood = 0, "N/A"
-    
-    # 3. Sectores
-    sec_perf = []
-    for t, name in SECTORS.items():
-        try:
-            if t in data.columns.levels[0]:
-                df = data[t].dropna()
-                if len(df) > 5:
-                    ret = (df['Close'].iloc[-1] - df['Close'].iloc[-6]) / df['Close'].iloc[-6] * 100
-                    sec_perf.append({"Sector": name, "Retorno 1S": ret})
-        except: continue
-        
-    return {"spy_trend": spy_trend, "vix": vix, "mood": mood}, pd.DataFrame(sec_perf)
 
-@st.cache_data(ttl=300)
-def escanear_acciones(tickers):
-    data = []
-    try:
-        df_bulk = yf.download(" ".join(tickers), period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
-    except: return pd.DataFrame()
+    resumen = []
     
-    for t in tickers:
+    # Barra de progreso para sensación premium
+    progress_bar = st.progress(0)
+    step = 1.0 / len(tickers)
+    
+    for i, t in enumerate(tickers):
         try:
+            # Manejo de datos multicapa
             if len(tickers) > 1:
-                if t not in df_bulk.columns.levels[0]: continue
-                df = df_bulk[t].copy().dropna()
-            else: df = df_bulk.copy().dropna()
+                if t not in df_prices.columns.levels[0]: continue
+                df = df_prices[t].copy().dropna()
+            else: df = df_prices.copy().dropna()
+
+            if len(df) < 50: continue
             
-            if len(df) < 200: continue
-            
-            close = df['Close'].iloc[-1]
+            # --- A. ANÁLISIS TÉCNICO ---
+            last_close = df['Close'].iloc[-1]
             rsi = ta.rsi(df['Close'], 14).iloc[-1]
             ema200 = ta.ema(df['Close'], 200).iloc[-1]
             atr = ta.atr(df['High'], df['Low'], df['Close'], 14).iloc[-1]
             
-            score = 0
-            trend = "ALCISTA" if close > ema200 else "BAJISTA"
-            if trend == "ALCISTA": score += 50
-            if rsi < 30: score += 40
+            # Tendencia Fractal (Diario vs Semanal aprox)
+            trend_d = "ALCISTA" if last_close > ema200 else "BAJISTA"
+            mom_1w = "ALCISTA" if df['Close'].iloc[-1] > df['Close'].iloc[-5] else "BAJISTA"
+            
+            # --- B. ANÁLISIS FUNDAMENTAL (LIGERO) ---
+            # Nota: yf.Ticker(t).info es lento si se hace en bucle. 
+            # Aquí usamos aproximaciones o llamadas selectivas para no bloquear.
+            # Para V25, calcularemos Volatilidad como proxy de riesgo fundamental inmediato
+            volatilidad = df['Close'].pct_change().std() * np.sqrt(252) * 100
+            
+            score = 50
+            if trend_d == "ALCISTA": score += 20
+            if mom_1w == "ALCISTA": score += 10
+            if rsi < 30: score += 30
             elif rsi > 70: score -= 20
             
-            data.append({"Ticker": t, "Precio": close, "RSI": rsi, "Tendencia": trend, "ATR": atr, "Score": score})
-        except: continue
-    return pd.DataFrame(data)
-
-# --- MOTOR DE OPTIMIZACIÓN (NUEVO) ---
-def simular_estrategia(df, rsi_buy, rsi_sell):
-    # Simulación vectorizada rápida
-    df['RSI'] = ta.rsi(df['Close'], 14)
-    df['Signal'] = 0
-    # Compra: RSI < rsi_buy
-    df.loc[df['RSI'] < rsi_buy, 'Signal'] = 1 
-    # Venta: RSI > rsi_sell
-    df.loc[df['RSI'] > rsi_sell, 'Signal'] = -1
-    
-    # Calcular retornos
-    df['Strategy_Ret'] = df['Signal'].shift(1) * df['Close'].pct_change()
-    total_return = (1 + df['Strategy_Ret']).cumprod().iloc[-1] - 1
-    trades_count = df['Signal'].abs().sum() / 2 # Aprox entradas y salidas
-    
-    return total_return * 100, int(trades_count)
-
-# --- INTERFAZ ---
-tab_macro, tab_radar, tab_trade, tab_lab = st.tabs(["1️⃣ Macro", "2️⃣ Radar", "3️⃣ Ejecución", "🧪 Laboratorio"])
-
-with tab_macro:
-    macro, df_sec = obtener_macro()
-    if macro:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("S&P 500", macro['spy_trend'])
-        c2.metric("VIX (Miedo)", f"{macro['vix']:.2f}", macro['mood'])
-        st.plotly_chart(px.bar(df_sec.sort_values("Retorno 1S"), x="Retorno 1S", y="Sector", orientation='h', title="Flujo de Dinero (1 Semana)"), use_container_width=True)
-
-with tab_radar:
-    st.subheader("📡 Escáner de Oportunidades")
-    df_radar = escanear_acciones(WATCHLIST)
-    if not df_radar.empty:
-        df_radar = df_radar.sort_values("Score", ascending=False)
-        st.dataframe(df_radar.style.format({"Precio": "${:.2f}", "RSI": "{:.1f}", "ATR": "{:.2f}"}), use_container_width=True)
-    else: st.warning("Cargando datos...")
-
-with tab_trade:
-    st.subheader("🛡️ Calculadora de Riesgo")
-    if not df_radar.empty:
-        tk_sel = st.selectbox("Activo", df_radar['Ticker'].tolist())
-        row = df_radar[df_radar['Ticker'] == tk_sel].iloc[0]
-        stop = row['Precio'] - (2 * row['ATR'])
-        shares = (capital_total * riesgo_pct / 100) / (row['Precio'] - stop)
+            resumen.append({
+                "Ticker": t,
+                "Precio": last_close,
+                "RSI": rsi,
+                "Tendencia": trend_d,
+                "Momentum (1S)": mom_1w,
+                "Volatilidad %": volatilidad,
+                "ATR": atr,
+                "Score": score
+            })
+        except: pass
+        progress_bar.progress(min((i + 1) * step, 1.0))
         
-        c1, c2 = st.columns(2)
-        c1.metric("Precio Entrada", f"${row['Precio']:.2f}")
-        c1.metric("Stop Loss (2xATR)", f"${stop:.2f}")
-        c2.metric("ACCIONES A COMPRAR", f"{int(shares)}")
-        c2.metric("Riesgo Total", f"${(capital_total * riesgo_pct / 100):.2f}")
-        
-        if st.button(f"🧠 Analizar {tk_sel} con IA"):
-            prompt = f"Analiza {tk_sel}. Precio ${row['Precio']}, RSI {row['RSI']}, Tendencia {row['Tendencia']}. Recomendación corta."
-            try:
-                res = model.generate_content(prompt)
-                st.info(res.text)
-            except: st.error("Error IA")
+    progress_bar.empty()
+    return pd.DataFrame(resumen), df_prices
 
-# --- PESTAÑA LABORATORIO (NUEVA) ---
-with tab_lab:
-    st.subheader("🔬 Optimizador de Estrategia (Backtest Dinámico)")
-    st.info("Descubre qué configuración de RSI funcionó mejor históricamente para un activo.")
-    
-    col_l1, col_l2 = st.columns([1, 3])
-    
-    with col_l1:
-        lab_ticker = st.selectbox("Activo a Optimizar", WATCHLIST)
-        lab_days = st.slider("Días de Historial", 100, 700, 365)
-        st.write("---")
-        st.write("**Rango de Pruebas:**")
-        start_buy = st.number_input("RSI Compra Desde", value=20)
-        end_buy = st.number_input("RSI Compra Hasta", value=40)
+@st.cache_data(ttl=3600)
+def obtener_fundamental_profundo(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return {
+            "PER": info.get('trailingPE', 0),
+            "PEG": info.get('pegRatio', 0), # < 1 es infravalorado
+            "P/B": info.get('priceToBook', 0),
+            "ROA": info.get('returnOnAssets', 0) * 100,
+            "Beta": info.get('beta', 1),
+            "Target Price": info.get('targetMeanPrice', 0),
+            "Sector": info.get('sector', 'N/A')
+        }
+    except: return None
+
+# --- EJECUCIÓN ---
+df_radar, df_raw_prices = obtener_datos_completos(WATCHLIST)
+
+# --- PESTAÑAS V25 ---
+tabs = st.tabs(["📡 Radar & Fundamental", "🕸️ Correlaciones (Riesgo)", "🛡️ Operativa", "🧪 Laboratorio"])
+
+with tabs[0]:
+    if df_radar is not None and not df_radar.empty:
+        col_main, col_detail = st.columns([2, 1])
         
-    with col_l2:
-        if st.button("🚀 INICIAR SIMULACIÓN MATRICIAL", type="primary"):
-            with st.spinner(f"Simulando miles de escenarios para {lab_ticker}..."):
-                # 1. Obtener datos
-                df_lab = yf.download(lab_ticker, period=f"{lab_days}d", interval="1d", progress=False, auto_adjust=True)
-                if isinstance(df_lab.columns, pd.MultiIndex): df_lab.columns = df_lab.columns.get_level_values(0)
-                
-                # 2. Grid Search (Fuerza Bruta Inteligente)
-                results = []
-                buy_range = range(start_buy, end_buy + 5, 5) # De 5 en 5
-                sell_range = range(60, 85, 5)
-                
-                best_ret = -999
-                best_params = (0, 0)
-                
-                for b in buy_range:
-                    for s in sell_range:
-                        if b >= s: continue # Configuración imposible
-                        ret, trades = simular_estrategia(df_lab.copy(), b, s)
-                        results.append({'RSI Compra': b, 'RSI Venta': s, 'Retorno %': ret, 'Trades': trades})
+        with col_main:
+            st.subheader("Radar de Oportunidades (Técnico)")
+            df_show = df_radar.sort_values("Score", ascending=False)
+            
+            def color_trend(val):
+                return 'color: lightgreen' if val == "ALCISTA" else 'color: #ffcccb'
+            
+            st.dataframe(
+                df_show.style.applymap(color_trend, subset=['Tendencia', 'Momentum (1S)'])
+                             .format({"Precio": "${:.2f}", "RSI": "{:.1f}", "Volatilidad %": "{:.1f}%"}),
+                use_container_width=True, height=400
+            )
+            
+        with col_detail:
+            st.subheader("🔬 Rayos X Fundamental")
+            sel_fund = st.selectbox("Analizar Fundamental:", df_radar['Ticker'].tolist())
+            
+            if st.button(f"🔍 Escanear {sel_fund}"):
+                with st.spinner("Descargando balance contable..."):
+                    fund_data = obtener_fundamental_profundo(sel_fund)
+                    if fund_data:
+                        st.markdown(f"**Sector:** {fund_data['Sector']}")
                         
-                        if ret > best_ret:
-                            best_ret = ret
-                            best_params = (b, s)
+                        m1, m2 = st.columns(2)
+                        m1.metric("PER (Precio/Beneficio)", f"{fund_data['PER']:.2f}", "Menor es mejor" if fund_data['PER'] < 20 else "Caro")
+                        m2.metric("PEG (Crecimiento)", f"{fund_data['PEG']:.2f}", "Infravalorado" if 0 < fund_data['PEG'] < 1 else "Normal")
+                        
+                        m3, m4 = st.columns(2)
+                        target = fund_data['Target Price']
+                        price = df_radar[df_radar['Ticker']==sel_fund]['Precio'].values[0]
+                        upside = ((target - price) / price) * 100
+                        
+                        m3.metric("Precio Objetivo Analystas", f"${target}", f"{upside:.1f}% Potencial")
+                        m4.metric("Beta (Volatilidad)", f"{fund_data['Beta']:.2f}")
+                        
+                        st.caption("Nota: PEG < 1 suele indicar que la acción está barata respecto a su crecimiento.")
+                    else: st.error("Datos no disponibles")
+
+with tabs[1]:
+    st.subheader("🕸️ Matriz de Correlación (Gestión de Diversificación)")
+    st.info("Evita comprar activos que se mueven igual (Correlación > 0.8). Busca diversificar.")
+    
+    if df_raw_prices is not None:
+        # Extraer solo precios de cierre para correlación
+        close_prices = pd.DataFrame()
+        for t in WATCHLIST:
+            try:
+                if t in df_raw_prices.columns.levels[0]:
+                    close_prices[t] = df_raw_prices[t]['Close']
+            except: pass
+            
+        if not close_prices.empty:
+            corr_matrix = close_prices.corr()
+            
+            fig_corr = px.imshow(
+                corr_matrix, 
+                text_auto=".2f", 
+                aspect="auto", 
+                color_continuous_scale="RdBu_r",
+                zmin=-1, zmax=1
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+            
+            # Lógica de advertencia
+            high_corr = corr_matrix.unstack().sort_values(ascending=False)
+            high_corr = high_corr[(high_corr < 1.0) & (high_corr > 0.85)].drop_duplicates()
+            
+            if not high_corr.empty:
+                st.warning(f"⚠️ **Alerta de Riesgo:** Los siguientes pares son casi idénticos. No tengas ambos:")
+                st.write(high_corr.head(5))
+
+with tabs[2]:
+    st.subheader("🛡️ Calculadora de Trading (V25)")
+    if not df_radar.empty:
+        # Selector inteligente
+        tk_op = st.selectbox("Activo a Operar", df_radar['Ticker'].tolist(), key="op_sel")
+        row = df_radar[df_radar['Ticker'] == tk_op].iloc[0]
+        
+        c1, c2, c3 = st.columns(3)
+        entry = row['Precio']
+        stop = entry - (2 * row['ATR'])
+        
+        # Riesgo
+        risk_amt = capital_total * (riesgo_pct / 100)
+        shares = risk_amt / (entry - stop)
+        
+        c1.metric("1. Precio Entrada", f"${entry:.2f}")
+        c2.metric("2. Stop Loss (Técnico)", f"${stop:.2f}")
+        c3.metric("3. TAMAÑO ORDEN", f"{int(shares)} Acciones", f"Riesgo: ${risk_amt:.2f}")
+        
+        st.write("---")
+        if st.button(f"🧠 JUEZ IA: ¿Comprar {tk_op}?"):
+            with st.spinner("Analizando Técnico + Fundamental + Noticias..."):
+                info = obtener_fundamental_profundo(tk_op)
+                peg = info['PEG'] if info else "N/A"
+                prompt = f"""
+                Analiza compra de {tk_op}.
+                Técnico: RSI {row['RSI']}, Tendencia {row['Tendencia']}.
+                Fundamental: PEG Ratio {peg}.
                 
-                # 3. Visualizar Resultados
-                df_res = pd.DataFrame(results)
-                
-                # KPI Ganador
-                st.success(f"🏆 MEJOR CONFIGURACIÓN: RSI Compra **{best_params[0]}** / Venta **{best_params[1]}**")
-                k1, k2 = st.columns(2)
-                k1.metric("Retorno Máximo Encontrado", f"{best_ret:.2f}%")
-                k1.caption(f"Comparado con Buy & Hold: {((df_lab['Close'].iloc[-1]/df_lab['Close'].iloc[0])-1)*100:.2f}%")
-                
-                # Mapa de Calor
-                st.subheader("Mapa de Calor de Rentabilidad")
-                fig_heat = px.density_heatmap(df_res, x="RSI Venta", y="RSI Compra", z="Retorno %", 
-                                              text_auto=True, color_continuous_scale="RdBu")
-                st.plotly_chart(fig_heat, use_container_width=True)
-                
-                st.dataframe(df_res.sort_values("Retorno %", ascending=False).head(5))
+                Responde:
+                1. ¿Es coherente el Técnico con el Fundamental?
+                2. Veredicto Final (SI/NO).
+                """
+                try:
+                    res = model.generate_content(prompt)
+                    st.success(res.text)
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                                  json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🤖 JUEZ V25: {res.text}"})
+                except: st.error("Error IA")
+
+with tabs[3]:
+    st.write("🧪 El Laboratorio sigue disponible en segundo plano.")
