@@ -22,7 +22,7 @@ from scipy.stats import norm
 import google.generativeai as genai
 from fpdf import FPDF 
 
-# --- CONFIGURACIÓN MOTOR HÍBRIDO ---
+# --- CONFIGURACIÓN E INICIOS ---
 try:
     from pypfopt import EfficientFrontier, risk_models, expected_returns
     from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
@@ -32,30 +32,32 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
-# --- 🔐 CREDENCIALES ---
 try:
     secrets_path = ".streamlit/secrets.toml"
     if os.path.exists(secrets_path):
         secrets = toml.load(secrets_path)
-        TELEGRAM_TOKEN = secrets["TELEGRAM_TOKEN"]
-        TELEGRAM_CHAT_ID = secrets["TELEGRAM_CHAT_ID"]
         GOOGLE_API_KEY = secrets["GOOGLE_API_KEY"]
     else:
-        TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
-        TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
         GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except: st.stop()
-
-st.set_page_config(page_title="Sistema Quant V49 (Genetic Lab)", layout="wide", page_icon="🧬")
-st.markdown("""<style>.metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;} .signal-box {border: 2px solid #FFD700; padding: 10px; border-radius: 5px; background-color: #2b2b00; text-align: center;} .trade-buy {color: #00ff00; font-weight: bold;} .trade-sell {color: #ff0000; font-weight: bold;}</style>""", unsafe_allow_html=True)
-
-try: genai.configure(api_key=GOOGLE_API_KEY); model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
+
+st.set_page_config(page_title="Sistema Quant V50 (Fund Manager)", layout="wide", page_icon="🏛️")
+st.markdown("""<style>
+    .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
+    .signal-box {border: 1px solid #444; padding: 10px; border-radius: 5px; background-color: #1e1e1e; text-align: center; margin-bottom: 5px;}
+    .bull {color: #00ff00; font-weight: bold;}
+    .bear {color: #ff0000; font-weight: bold;}
+    .stTabs [data-baseweb="tab-list"] {gap: 10px;}
+    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
+    .stTabs [aria-selected="true"] {background-color: #262730;}
+</style>""", unsafe_allow_html=True)
 
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR SQL (CORREGIDO PARA EVITAR ERROR ATTRIBUTEERROR) ---
+# --- MOTOR SQL ROBUSTO ---
 def init_db():
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL)''')
@@ -68,14 +70,11 @@ def registrar_operacion_sql(ticker, tipo, cantidad, precio):
     conn.commit(); conn.close(); return True
 
 def auditar_posiciones_sql():
-    # 🛠️ FIX V49: Devolver siempre columnas, aunque esté vacío
     empty_df = pd.DataFrame(columns=["Ticker", "Cantidad", "Precio Prom.", "Precio Actual", "Valor Mercado", "P&L ($)", "P&L (%)"])
-    
     conn = sqlite3.connect(DB_NAME)
     try: df = pd.read_sql_query("SELECT * FROM trades", conn)
     except: return empty_df
     conn.close()
-    
     if df.empty: return empty_df
     
     pos = {}
@@ -88,12 +87,12 @@ def auditar_posiciones_sql():
             if pos[t]["Cantidad"] > 0: unit = pos[t]["Costo_Total"]/(pos[t]["Cantidad"]+row['cantidad']); pos[t]["Costo_Total"] -= (unit*row['cantidad'])
             else: pos[t]["Costo_Total"] = 0
             
-    res = []; act = [t for t, d in pos.items() if d['Cantidad'] > 0]
+    act = [t for t, d in pos.items() if d['Cantidad'] > 0]
     if not act: return empty_df
-    
     try: curr = yf.download(" ".join(act), period="1d", progress=False, auto_adjust=True)['Close']
     except: return empty_df
 
+    res = []
     for t, d in pos.items():
         if d['Cantidad'] > 0:
             try:
@@ -102,186 +101,209 @@ def auditar_posiciones_sql():
                 val = d['Cantidad']*price; pnl = val - d['Costo_Total']
                 res.append({"Ticker": t, "Cantidad": d['Cantidad'], "Precio Prom.": d['Costo_Total']/d['Cantidad'], "Precio Actual": price, "Valor Mercado": val, "P&L ($)": pnl, "P&L (%)": (pnl/d['Costo_Total'])*100})
             except: pass
-            
     return pd.DataFrame(res) if res else empty_df
 
 init_db()
 
-# --- MOTOR DE OPTIMIZACIÓN GENÉTICA (GRID SEARCH) V49 ---
-def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
-    """Prueba múltiples combinaciones de parámetros para encontrar la mejor"""
+# --- MOTORES DE ANÁLISIS (OPTIMIZADOS V50) ---
+@st.cache_data(ttl=600)
+def generar_mapa_calor(tickers):
     try:
-        # Descarga única de datos para eficiencia
-        df_base = yf.Ticker(ticker).history(period="2y", interval="1d", auto_adjust=True)
-        if df_base.empty: return None
-        if df_base.index.tz is not None: df_base.index = df_base.index.tz_localize(None)
+        data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
+        pct = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        df = pd.DataFrame({'Ticker': pct.index, 'Variacion': pct.values, 'Precio': data.iloc[-1].values})
+        sec = []
+        for t in df['Ticker']:
+            if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sec.append('Tech')
+            elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sec.append('Cripto')
+            elif t in ['SPY', 'QQQ', 'DIA']: sec.append('Índices')
+            elif t in ['GLD', 'USO']: sec.append('Commodities')
+            else: sec.append('Otros')
+        df['Sector'] = sec; df['Size'] = df['Precio'] 
+        return df
+    except: return None
+
+def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
+    try:
+        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True) # Periodo más corto para velocidad
+        if df.empty: return pd.DataFrame()
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
         
         resultados = []
+        df['RSI'] = ta.rsi(df['Close'], 14)
         
-        if estrategia == "RSI":
-            # Grid Search: Probamos Buy (20, 25, 30, 35) vs Sell (65, 70, 75, 80)
-            df_base['RSI'] = ta.rsi(df_base['Close'], 14)
-            buy_range = [20, 25, 30, 35]
-            sell_range = [65, 70, 75, 80]
-            
-            for b in buy_range:
-                for s in sell_range:
-                    # Simulación rápida vectorial
-                    # (Simplificación para velocidad: no gestiona cash path-dependent exacto, solo señales)
-                    # Para precisión usamos lógica de iteración rápida
-                    cash = 10000; pos = 0
-                    buy_sig = df_base['RSI'] < b
-                    sell_sig = df_base['RSI'] > s
-                    
-                    # Backtest Rápido
-                    for i in range(15, len(df_base)):
-                        p = df_base['Close'].iloc[i]
-                        if cash > 0 and buy_sig.iloc[i]:
-                            pos = cash / p; cash = 0
-                        elif pos > 0 and sell_sig.iloc[i]:
-                            cash = pos * p; pos = 0
-                            
-                    final = cash + (pos * df_base['Close'].iloc[-1])
-                    ret = ((final - 10000) / 10000) * 100
-                    resultados.append({"Compra <": b, "Venta >": s, "Retorno %": ret})
-                    
+        for b in [20, 30, 40]:
+            for s in [60, 70, 80]:
+                cash = 10000; pos = 0
+                # Vectorizado simple
+                buy_sig = df['RSI'] < b; sell_sig = df['RSI'] > s
+                for i in range(15, len(df)):
+                    p = df['Close'].iloc[i]
+                    if cash > 0 and buy_sig.iloc[i]: pos = cash/p; cash = 0
+                    elif pos > 0 and sell_sig.iloc[i]: cash = pos*p; pos = 0
+                final = cash + (pos * df['Close'].iloc[-1])
+                resultados.append({"Compra <": b, "Venta >": s, "Retorno %": ((final-10000)/10000)*100})
+        
         return pd.DataFrame(resultados)
-        
-    except Exception as e: return None
+    except: return pd.DataFrame() # Retorna vacío seguro
 
-# --- MOTORES EXISTENTES (Rebalanceo, etc) ---
-def generar_ordenes_rebalanceo(df_actual, pesos_objetivo, capital_total):
-    ordenes = []
-    # FIX V49: Si df_actual viene vacío pero con columnas, no falla
-    if df_actual.empty: return pd.DataFrame()
-    
-    estado_actual = dict(zip(df_actual['Ticker'], df_actual['Valor Mercado']))
-    precios_actuales = dict(zip(df_actual['Ticker'], df_actual['Valor Mercado'] / df_actual['Cantidad']))
-    
-    for ticker, peso_target in pesos_objetivo.items():
-        if peso_target <= 0.01: continue 
-        valor_objetivo = capital_total * peso_target
-        valor_actual = estado_actual.get(ticker, 0)
-        diferencia = valor_objetivo - valor_actual
-        try:
-            if ticker in precios_actuales: precio = precios_actuales[ticker]
-            else: precio = float(yf.Ticker(ticker).history(period='1d')['Close'].iloc[-1])
-            cantidad_ajuste = int(diferencia / precio)
-            if cantidad_ajuste != 0:
-                tipo = "COMPRA" if cantidad_ajuste > 0 else "VENTA"
-                ordenes.append({"Ticker": ticker, "Acción": tipo, "Cantidad": abs(cantidad_ajuste), "Precio Est.": precio, "Valor Ajuste": abs(cantidad_ajuste * precio)})
-        except: pass
-    return pd.DataFrame(ordenes)
-
-def optimizar_portafolio_simple(tickers, capital):
+def calcular_valor_intrinseco(ticker):
     try:
-        df = yf.download(tickers, period="1y", progress=False, auto_adjust=True)['Close']
+        i = yf.Ticker(ticker).info
+        p = i.get('currentPrice') or i.get('regularMarketPreviousClose') or 0
+        e = i.get('trailingEps', 0); b = i.get('bookValue', 0)
+        if e and b and e > 0 and b > 0:
+            g = math.sqrt(22.5 * e * b)
+            s = "INFRAVALORADA 🟢" if g > p else "SOBREVALORADA 🔴"
+            return {"Precio": p, "Graham": g, "Status_Graham": s, "Diff": ((g-p)/p)*100}
+    except: pass
+    return None
+
+def graficar_master(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
         if df.empty: return None
-        log_ret = np.log(df/df.shift(1))
-        def neg_sharpe(w):
-            w = np.array(w); ret = np.sum(log_ret.mean() * w) * 252; vol = np.sqrt(np.dot(w.T, np.dot(log_ret.cov() * 252, w)))
-            return -(ret/vol) if vol > 0 else 0
-        cons = ({'type':'eq','fun': lambda x: np.sum(x) - 1}); bounds = tuple((0, 1) for _ in range(len(tickers))); init = [1/len(tickers)] * len(tickers)
-        opt = minimize(neg_sharpe, init, method='SLSQP', bounds=bounds, constraints=cons)
-        return dict(zip(tickers, opt.x))
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
+        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
+        
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        try: 
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
+        except: pass
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name="RSI"), row=2, col=1)
+        fig.add_hline(y=70, line_color="red", row=2, col=1); fig.add_hline(y=30, line_color="green", row=2, col=1)
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0))
+        return fig
     except: return None
 
-def graficar_master(t):
-    try:
-        df=yf.Ticker(t).history(period="1y", auto_adjust=True)
-        fig=go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-        fig.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False); return fig
-    except: return None
-
-def analizar_noticias_ia(t): return {"score":0, "summary":"-", "headlines":[]}
-@st.cache_data(ttl=3600)
-def calcular_valor_intrinseco(t): return None
-def simular_montecarlo(t, d=30, s=500): return None, None
 @st.cache_data(ttl=300)
-def escanear_oportunidades(ts):
-    s=[]; d=yf.download(" ".join(ts), period="3mo", progress=False, group_by='ticker', auto_adjust=True)
-    for t in ts:
+def escanear_oportunidades(tickers):
+    s = []
+    try: data = yf.download(" ".join(tickers), period="3mo", progress=False, group_by='ticker', auto_adjust=True)
+    except: return pd.DataFrame()
+    for t in tickers:
         try:
-            df=d[t].dropna() if len(ts)>1 else d.dropna(); c=df['Close'].iloc[-1]; r=ta.rsi(df['Close'],14).iloc[-1]
-            if r<30: s.append({"Ticker":t, "Señal":"COMPRA RSI 🟢"})
-            elif r>70: s.append({"Ticker":t, "Señal":"VENTA RSI 🔴"})
-        except:pass
+            df = data[t].dropna() if len(tickers) > 1 else data.dropna()
+            if len(df) < 14: continue
+            c = df['Close'].iloc[-1]; r = ta.rsi(df['Close'], 14).iloc[-1]
+            if r < 30: s.append({"Ticker": t, "Señal": "COMPRA RSI 🟢"})
+            elif r > 70: s.append({"Ticker": t, "Señal": "VENTA RSI 🔴"})
+        except: pass
     return pd.DataFrame(s)
 
-# --- INTERFAZ ---
-st.title("🧬 Sistema Quant V49: Genetic Lab")
+# --- INTERFAZ V50: THE FUND MANAGER ---
+st.title("🏛️ Sistema Quant V50: Fund Manager")
 
-# 1. GESTIÓN
-col_p1, col_p2 = st.columns([1.5, 1])
-with col_p1:
-    st.subheader("🏦 Portafolio")
-    df_pos = auditar_posiciones_sql() # Ahora es seguro llamarla
-    if not df_pos.empty:
-        equity_total = df_pos['Valor Mercado'].sum()
-        st.metric("Equity", f"${equity_total:,.2f}")
-        st.dataframe(df_pos[['Ticker', 'Cantidad', 'Valor Mercado', 'P&L (%)']])
-    else: st.info("Sin posiciones abiertas.")
+# DASHBOARD EJECUTIVO (KPIs)
+df_pos = auditar_posiciones_sql()
+df_alerts = escanear_oportunidades(WATCHLIST)
 
-with col_p2:
-    with st.expander("📝 Operar Manual", expanded=False):
-        t_op = st.selectbox("Activo", WATCHLIST)
-        tipo = st.selectbox("Orden", ["COMPRA", "VENTA"])
-        qty = st.number_input("Cant", 1, 1000); px = st.number_input("Precio", 0.0)
-        if st.button("Ejecutar"): registrar_operacion_sql(t_op, tipo, qty, px); st.rerun()
+col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+with col_kpi1:
+    equity = df_pos['Valor Mercado'].sum() if not df_pos.empty else 0.0
+    st.metric("Patrimonio Neto", f"${equity:,.2f}", help="Valor total de tus acciones hoy")
+with col_kpi2:
+    pnl = df_pos['P&L ($)'].sum() if not df_pos.empty else 0.0
+    st.metric("P&L Total", f"${pnl:+.2f}", delta_color="normal")
+with col_kpi3:
+    alerts_count = len(df_alerts) if not df_alerts.empty else 0
+    st.metric("Oportunidades Hoy", str(alerts_count), "Señales Activas")
+with col_kpi4:
+    sp500 = yf.Ticker("SPY").history(period="2d")['Close']
+    if len(sp500) > 1:
+        delta_spy = ((sp500.iloc[-1] - sp500.iloc[-2])/sp500.iloc[-2])*100
+        st.metric("Mercado (SP500)", f"${sp500.iloc[-1]:.2f}", f"{delta_spy:+.2f}%")
 
 st.divider()
 
-# 2. LABORATORIO GENÉTICO (NUEVO V49)
-c_l, c_r = st.columns([1, 2.5])
-with c_l: 
-    tk = st.selectbox("Analizar Ticker:", WATCHLIST)
-    capital_total_real = 10000.0 if df_pos.empty else df_pos['Valor Mercado'].sum() + 1000
+# LAYOUT PRINCIPAL: 3 PESTAÑAS MAESTRAS
+main_tabs = st.tabs(["💼 MESA DE DINERO", "📊 ANÁLISIS & ESTRATEGIA", "🧬 LABORATORIO QUANT"])
 
-with c_r: 
-    tabs = st.tabs(["🧬 Optimizar Parámetros", "⚖️ Rebalanceo", "📈 Gráfico"])
-    
-    # PESTAÑA 1: GRID SEARCH (V49)
-    with tabs[0]:
-        st.subheader(f"🧬 Búsqueda de la Estrategia Perfecta: {tk}")
-        st.write("El sistema probará automáticamente múltiples combinaciones de RSI para encontrar la más rentable históricamente.")
-        
-        if st.button("🚀 INICIAR GRID SEARCH"):
-            with st.spinner(f"Simulando 16 escenarios para {tk}..."):
-                res_grid = optimizar_parametros_estrategia(tk, "RSI")
-                
-                if res_grid is not None and not res_grid.empty:
-                    # Encontrar el mejor
-                    mejor = res_grid.loc[res_grid['Retorno %'].idxmax()]
-                    
-                    c1, c2 = st.columns(2)
-                    c1.success(f"🏆 MEJOR CONFIGURACIÓN: Compra < {mejor['Compra <']} | Venta > {mejor['Venta >']}")
-                    c1.metric("Retorno Máximo", f"{mejor['Retorno %']:.2f}%")
-                    
-                    # Mapa de Calor
-                    fig_heat = px.density_heatmap(
-                        res_grid, x="Compra <", y="Venta >", z="Retorno %", 
-                        text_auto=True, title="Mapa de Rentabilidad (RSI)",
-                        color_continuous_scale="RdYlGn"
-                    )
-                    c2.plotly_chart(fig_heat, use_container_width=True)
-                else:
-                    st.error("No hay datos suficientes.")
-
-    # PESTAÑA 2: REBALANCEO (V48 FIX)
-    with tabs[1]:
+# --- TAB 1: OPERATIVA Y GESTIÓN ---
+with main_tabs[0]:
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("Cartera de Inversión")
         if not df_pos.empty:
-            activos_target = st.multiselect("Target Allocation:", WATCHLIST, default=df_pos['Ticker'].unique().tolist())
-            if st.button("🔄 CALCULAR"):
-                pesos = optimizar_portafolio_simple(activos_target, capital_total_real)
-                if pesos:
-                    ordenes = generar_ordenes_rebalanceo(df_pos, pesos, capital_total_real)
-                    st.dataframe(ordenes)
-                    
-                    # Graficar Torta SOLO si hay datos
-                    fig_act = px.pie(df_pos, values='Valor Mercado', names='Ticker', title="Actual")
-                    st.plotly_chart(fig_act, use_container_width=True)
-        else: st.warning("Necesitas posiciones para rebalancear.")
+            st.dataframe(
+                df_pos.style.format({"Precio Prom.": "${:.2f}", "Precio Actual": "${:.2f}", "Valor Mercado": "${:.2f}", "P&L ($)": "${:+.2f}", "P&L (%)": "{:+.2f}%"})
+                .background_gradient(subset=['P&L (%)'], cmap='RdYlGn', vmin=-10, vmax=10),
+                use_container_width=True
+            )
+        else:
+            st.info("No tienes posiciones abiertas. Usa el panel derecho para comprar.")
+            
+    with c2:
+        st.subheader("Ejecución de Órdenes")
+        with st.form("order_form"):
+            t_op = st.selectbox("Activo", WATCHLIST)
+            tipo = st.selectbox("Operación", ["COMPRA", "VENTA"])
+            qty = st.number_input("Cantidad", 1, 10000)
+            px = st.number_input("Precio Ejecución", 0.0)
+            if st.form_submit_button("CONFIRMAR ORDEN (SQL)"):
+                registrar_operacion_sql(t_op, tipo, qty, px)
+                st.success(f"Orden {tipo} {t_op} registrada.")
+                st.rerun()
 
-    with tabs[2]:
-        fig = graficar_master(tk)
+# --- TAB 2: ANÁLISIS ---
+with main_tabs[1]:
+    col_ana1, col_ana2 = st.columns([1, 3])
+    with col_ana1:
+        sel_ticker = st.selectbox("Analizar Activo:", WATCHLIST)
+        
+        # Fundamental Rápido
+        fund = calcular_valor_intrinseco(sel_ticker)
+        if fund:
+            st.markdown("---")
+            st.metric("Precio", f"${fund['Precio']:.2f}")
+            st.metric("Valor Graham", f"${fund['Graham']:.2f}", f"{fund['Diff']:.1f}%")
+            if "INFRA" in fund['Status_Graham']: st.success("🟢 Subvaluada")
+            else: st.error("🔴 Sobrevaluada")
+
+    with col_ana2:
+        # Gráfico Master
+        fig = graficar_master(sel_ticker)
         if fig: st.plotly_chart(fig, use_container_width=True)
+        
+        # Heatmap
+        with st.expander("Ver Mapa de Calor del Mercado"):
+            try:
+                df_map = generar_mapa_calor(WATCHLIST)
+                if df_map is not None:
+                    fig_heat = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
+                    st.plotly_chart(fig_heat, use_container_width=True)
+            except: st.warning("Datos de heatmap no disponibles.")
+
+# --- TAB 3: LABORATORIO (GRID SEARCH FIX V50) ---
+with main_tabs[2]:
+    st.subheader(f"🧬 Optimización Genética: {sel_ticker}")
+    st.write("Busca la configuración de RSI que históricamente generó más ganancias.")
+    
+    if st.button("🚀 CORRER SIMULACIÓN"):
+        with st.spinner("Probando combinaciones..."):
+            res_grid = optimizar_parametros_estrategia(sel_ticker)
+            
+            if not res_grid.empty:
+                # Encontrar mejor
+                best = res_grid.loc[res_grid['Retorno %'].idxmax()]
+                st.success(f"Mejor Configuración: Compra < {best['Compra <']} | Venta > {best['Venta >']} | Retorno: {best['Retorno %']:.2f}%")
+                
+                # Gráfico Blindado V50
+                try:
+                    # Aseguramos tipos numéricos
+                    res_grid = res_grid.astype(float)
+                    fig_opt = px.density_heatmap(
+                        res_grid, x="Compra <", y="Venta >", z="Retorno %", 
+                        text_auto=".1f", color_continuous_scale="Viridis",
+                        title="Mapa de Rentabilidad (Z = Retorno %)"
+                    )
+                    st.plotly_chart(fig_opt, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"No se pudo graficar el mapa de calor: {e}")
+                    st.dataframe(res_grid) # Mostramos tabla si falla gráfico
+            else:
+                st.error("No hay suficientes datos históricos para optimizar este activo.")
