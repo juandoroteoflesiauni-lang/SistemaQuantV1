@@ -410,4 +410,4 @@ with c_right:
         df_map = generar_mapa_calor(WATCHLIST)
         if df_map is not None:
             fig_map = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
-            st.plotly_chart(fig_map, use_container_width=True)
+            st.plotly_chart(fig_map,  use_container_width=True)
