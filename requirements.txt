@@ -9,4 +9,3 @@ feedparser
 quantstats
 matplotlib
 seaborn
-ipython
