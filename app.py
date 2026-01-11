@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import plotly.express as px  # <--- px es la librería
 from plotly.subplots import make_subplots 
 import warnings
 import numpy as np
@@ -43,7 +43,7 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V50 (Fund Manager)", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Sistema Quant V50.1 (Fixed)", layout="wide", page_icon="🏛️")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
     .signal-box {border: 1px solid #444; padding: 10px; border-radius: 5px; background-color: #1e1e1e; text-align: center; margin-bottom: 5px;}
@@ -105,7 +105,7 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTORES DE ANÁLISIS (OPTIMIZADOS V50) ---
+# --- MOTORES DE ANÁLISIS ---
 @st.cache_data(ttl=600)
 def generar_mapa_calor(tickers):
     try:
@@ -125,7 +125,7 @@ def generar_mapa_calor(tickers):
 
 def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
     try:
-        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True) # Periodo más corto para velocidad
+        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
         if df.empty: return pd.DataFrame()
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         
@@ -135,7 +135,6 @@ def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
         for b in [20, 30, 40]:
             for s in [60, 70, 80]:
                 cash = 10000; pos = 0
-                # Vectorizado simple
                 buy_sig = df['RSI'] < b; sell_sig = df['RSI'] > s
                 for i in range(15, len(df)):
                     p = df['Close'].iloc[i]
@@ -145,7 +144,7 @@ def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
                 resultados.append({"Compra <": b, "Venta >": s, "Retorno %": ((final-10000)/10000)*100})
         
         return pd.DataFrame(resultados)
-    except: return pd.DataFrame() # Retorna vacío seguro
+    except: return pd.DataFrame()
 
 def calcular_valor_intrinseco(ticker):
     try:
@@ -195,8 +194,8 @@ def escanear_oportunidades(tickers):
         except: pass
     return pd.DataFrame(s)
 
-# --- INTERFAZ V50: THE FUND MANAGER ---
-st.title("🏛️ Sistema Quant V50: Fund Manager")
+# --- INTERFAZ V50.1: THE FUND MANAGER ---
+st.title("🏛️ Sistema Quant V50.1: Fund Manager")
 
 # DASHBOARD EJECUTIVO (KPIs)
 df_pos = auditar_posiciones_sql()
@@ -243,9 +242,11 @@ with main_tabs[0]:
             t_op = st.selectbox("Activo", WATCHLIST)
             tipo = st.selectbox("Operación", ["COMPRA", "VENTA"])
             qty = st.number_input("Cantidad", 1, 10000)
-            px = st.number_input("Precio Ejecución", 0.0)
+            # 🛠️ FIX V50.1: Renombramos la variable 'px' a 'precio_ejec' para no borrar Plotly Express
+            precio_ejec = st.number_input("Precio Ejecución", 0.0)
+            
             if st.form_submit_button("CONFIRMAR ORDEN (SQL)"):
-                registrar_operacion_sql(t_op, tipo, qty, px)
+                registrar_operacion_sql(t_op, tipo, qty, precio_ejec)
                 st.success(f"Orden {tipo} {t_op} registrada.")
                 st.rerun()
 
@@ -274,11 +275,12 @@ with main_tabs[1]:
             try:
                 df_map = generar_mapa_calor(WATCHLIST)
                 if df_map is not None:
+                    # Aquí 'px' vuelve a funcionar porque ya no está sobreescrito
                     fig_heat = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
                     st.plotly_chart(fig_heat, use_container_width=True)
             except: st.warning("Datos de heatmap no disponibles.")
 
-# --- TAB 3: LABORATORIO (GRID SEARCH FIX V50) ---
+# --- TAB 3: LABORATORIO (GRID SEARCH) ---
 with main_tabs[2]:
     st.subheader(f"🧬 Optimización Genética: {sel_ticker}")
     st.write("Busca la configuración de RSI que históricamente generó más ganancias.")
@@ -292,10 +294,10 @@ with main_tabs[2]:
                 best = res_grid.loc[res_grid['Retorno %'].idxmax()]
                 st.success(f"Mejor Configuración: Compra < {best['Compra <']} | Venta > {best['Venta >']} | Retorno: {best['Retorno %']:.2f}%")
                 
-                # Gráfico Blindado V50
+                # Gráfico
                 try:
-                    # Aseguramos tipos numéricos
                     res_grid = res_grid.astype(float)
+                    # Ahora px.density_heatmap funcionará correctamente
                     fig_opt = px.density_heatmap(
                         res_grid, x="Compra <", y="Venta >", z="Retorno %", 
                         text_auto=".1f", color_continuous_scale="Viridis",
@@ -303,7 +305,7 @@ with main_tabs[2]:
                     )
                     st.plotly_chart(fig_opt, use_container_width=True)
                 except Exception as e:
-                    st.warning(f"No se pudo graficar el mapa de calor: {e}")
-                    st.dataframe(res_grid) # Mostramos tabla si falla gráfico
+                    st.warning(f"Error gráfico: {e}")
+                    st.dataframe(res_grid)
             else:
                 st.error("No hay suficientes datos históricos para optimizar este activo.")
