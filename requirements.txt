@@ -7,6 +7,6 @@ requests
 google-generativeai
 feedparser
 scikit-learn
+scipy
 toml
 PyPortfolioOpt
-scipy
