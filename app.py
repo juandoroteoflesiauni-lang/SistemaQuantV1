@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots # Importante para gráficos dobles
+from plotly.subplots import make_subplots 
 import requests 
 import google.generativeai as genai
 import feedparser
@@ -27,10 +27,10 @@ try:
         TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
         TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
         GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except: st.stop() # Silencioso si falla para ir rápido
+except: st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V28 (Sniper)", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Sistema Quant V28.1 (Fixed)", layout="wide", page_icon="🎯")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
@@ -59,9 +59,12 @@ def obtener_datos_completos(tickers):
     for t in tickers:
         try:
             if len(tickers) > 1:
-                if t not in df_prices.columns.levels[0]: continue
-                df = df_prices[t].copy().dropna()
-            else: df = df_prices.copy().dropna()
+                # Verificación de seguridad para MultiIndex
+                if t in df_prices.columns.levels[0]:
+                    df = df_prices[t].copy().dropna()
+                else: continue
+            else: 
+                df = df_prices.copy().dropna()
 
             if len(df) < 50: continue
             
@@ -81,53 +84,69 @@ def obtener_datos_completos(tickers):
         except: pass
     return pd.DataFrame(resumen)
 
-# --- MOTOR GRÁFICO (NUEVO) ---
+# --- MOTOR GRÁFICO (CORREGIDO) ---
 def graficar_avanzado(ticker):
-    df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
-    if df.empty: return None
-    
-    # Calcular Indicadores
-    df['EMA20'] = ta.ema(df['Close'], 20)
-    df['EMA50'] = ta.ema(df['Close'], 50)
-    df['RSI'] = ta.rsi(df['Close'], 14)
-    bb = ta.bbands(df['Close'], length=20, std=2)
-    df = pd.concat([df, bb], axis=1) # Unir bandas al df
-    
-    # Señales Visuales (Triángulos)
-    # Compra: RSI < 35
-    buy_signals = df[df['RSI'] < 35]
-    # Venta: RSI > 75
-    sell_signals = df[df['RSI'] > 75]
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        if df.empty: return None
+        
+        # 🛠️ CORRECCIÓN CRÍTICA: Aplanar MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(-1)
+        
+        # Calcular Indicadores
+        df['EMA20'] = ta.ema(df['Close'], 20)
+        df['EMA50'] = ta.ema(df['Close'], 50)
+        df['RSI'] = ta.rsi(df['Close'], 14)
+        
+        # Bandas de Bollinger
+        bb = ta.bbands(df['Close'], length=20, std=2)
+        if bb is not None:
+            df = pd.concat([df, bb], axis=1) 
+        else:
+            return None # Si falla el cálculo de bandas
 
-    # Crear Subplots (Arriba Precio, Abajo RSI)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        # Nombres de columnas esperados por pandas_ta
+        bbu = 'BBU_20_2.0'
+        bbl = 'BBL_20_2.0'
 
-    # 1. Velas Japonesas
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
-    
-    # 2. Medias Móviles y Bandas
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
+        # Señales Visuales
+        buy_signals = df[df['RSI'] < 35]
+        sell_signals = df[df['RSI'] > 75]
 
-    # 3. Marcadores de Señal
-    fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="SEÑAL COMPRA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="ALERTA VENTA"), row=1, col=1)
+        # Crear Subplots
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
 
-    # 4. RSI (Abajo)
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
-    # Líneas de sobrecompra/venta
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        # 1. Velas Japonesas
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        
+        # 2. Medias y Bandas (con protección de error)
+        if 'EMA20' in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        
+        if bbu in df.columns and bbl in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[bbu], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df[bbl], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
 
-    fig.update_layout(title=f"🔬 Análisis Técnico Profundo: {ticker}", template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
-    return fig
+        # 3. Marcadores
+        fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="SEÑAL COMPRA"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="ALERTA VENTA"), row=1, col=1)
+
+        # 4. RSI
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+        fig.update_layout(title=f"🔬 Análisis Técnico Profundo: {ticker}", template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
+        return fig
+    except Exception as e:
+        st.error(f"Error graficando {ticker}: {e}")
+        return None
 
 # --- INTERFAZ ---
-st.title("🎯 Sistema Quant V28: The Sniper Scope")
+st.title("🎯 Sistema Quant V28.1: The Sniper Scope")
 
-# Layout de 2 Columnas: Izquierda (Radar), Derecha (Gráfico)
 col_radar, col_chart = st.columns([1, 3])
 
 with col_radar:
@@ -136,29 +155,27 @@ with col_radar:
     
     df_radar = obtener_datos_completos(WATCHLIST)
     
-    if df_radar is not None:
-        # Selector de activo (Funciona como control remoto del gráfico)
+    if df_radar is not None and not df_radar.empty:
         df_radar = df_radar.sort_values("Score", ascending=False)
         selected_ticker = st.radio("Selecciona Activo:", df_radar['Ticker'].tolist())
         
-        # Muestra datos rápidos del seleccionado
         row = df_radar[df_radar['Ticker'] == selected_ticker].iloc[0]
         st.divider()
         st.metric("Score", f"{row['Score']}/100")
         st.metric("RSI", f"{row['RSI']:.1f}")
         st.caption(f"Tendencia: {row['Tendencia']}")
         
-        # Botón de Telegram Rápido
         if st.button(f"📢 Alertar {selected_ticker}"):
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                           json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 OJO con {selected_ticker}. RSI: {row['RSI']:.1f}"})
             st.success("Enviado")
+    else:
+        st.info("Cargando datos...")
 
 with col_chart:
-    if df_radar is not None:
+    if df_radar is not None and not df_radar.empty:
         st.subheader(f"📊 Gráfico Interactivo: {selected_ticker}")
         
-        # Pestañas dentro del gráfico para cambiar de vista
         t_chart, t_news = st.tabs(["📈 Gráfico Técnico", "📰 Noticias IA"])
         
         with t_chart:
@@ -168,7 +185,6 @@ with col_chart:
         
         with t_news:
             if st.button("Analizar Noticias (Live)"):
-                # Código V27 simplificado
                 try:
                     rss = f"https://news.google.com/rss/search?q={selected_ticker}+stock&hl=en-US&gl=US&ceid=US:en"
                     feed = feedparser.parse(rss)
