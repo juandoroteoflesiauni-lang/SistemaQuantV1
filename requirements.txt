@@ -6,8 +6,6 @@ plotly
 requests
 google-generativeai
 feedparser
-quantstats
-matplotlib
-seaborn
 scikit-learn
+toml
 PyPortfolioOpt
