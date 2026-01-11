@@ -30,7 +30,7 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V28.1 (Fixed)", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Sistema Quant V28.2 (Robust)", layout="wide", page_icon="🎯")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
@@ -84,31 +84,55 @@ def obtener_datos_completos(tickers):
         except: pass
     return pd.DataFrame(resumen)
 
-# --- MOTOR GRÁFICO (CORREGIDO) ---
+# --- MOTOR GRÁFICO (RE-BLINDADO) ---
 def graficar_avanzado(ticker):
     try:
+        # Descarga
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
         if df.empty: return None
         
-        # 🛠️ CORRECCIÓN CRÍTICA: Aplanar MultiIndex
+        # 🛠️ ESTRATEGIA DE LIMPIEZA DE COLUMNAS (NUEVA)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(-1)
-        
-        # Calcular Indicadores
+            # Intento 1: Si el ticker es el nivel superior, bajamos un nivel
+            try:
+                if ticker in df.columns.levels[0]:
+                    df = df[ticker].copy()
+                else:
+                    # Intento 2: Tomar el último nivel (suele ser Price, Open, Close...)
+                    df.columns = df.columns.get_level_values(-1)
+            except:
+                # Intento 3: Aplanamiento genérico
+                df.columns = df.columns.get_level_values(-1)
+
+        # 🛠️ SEGURO DE VIDA: Si después de todo no hay columna 'Close', renombramos por fuerza bruta
+        if 'Close' not in df.columns:
+            # Asumimos el orden estándar de Yahoo: Open, High, Low, Close, Volume
+            if df.shape[1] >= 4:
+                # Mapeo de seguridad (ajustar según lo que devuelve tu versión de yfinance)
+                # A veces devuelve 5 col (con Volume) a veces 4.
+                # Intentamos buscar la columna que se parezca a 'Close'
+                cols = list(df.columns)
+                found = False
+                for c in cols:
+                    if "Close" in str(c): 
+                        df.rename(columns={c: 'Close'}, inplace=True)
+                        found = True
+                        break
+                if not found and df.shape[1] == 5:
+                     df.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+        # Calcular Indicadores (Ahora seguro)
         df['EMA20'] = ta.ema(df['Close'], 20)
-        df['EMA50'] = ta.ema(df['Close'], 50)
         df['RSI'] = ta.rsi(df['Close'], 14)
         
         # Bandas de Bollinger
         bb = ta.bbands(df['Close'], length=20, std=2)
         if bb is not None:
             df = pd.concat([df, bb], axis=1) 
+            bbu = df.columns[-3] # Banda Superior (pandas_ta pone nombres raros a veces, usamos índice)
+            bbl = df.columns[-1] # Banda Inferior
         else:
-            return None # Si falla el cálculo de bandas
-
-        # Nombres de columnas esperados por pandas_ta
-        bbu = 'BBU_20_2.0'
-        bbl = 'BBL_20_2.0'
+            return None
 
         # Señales Visuales
         buy_signals = df[df['RSI'] < 35]
@@ -121,31 +145,33 @@ def graficar_avanzado(ticker):
         # 1. Velas Japonesas
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
         
-        # 2. Medias y Bandas (con protección de error)
+        # 2. Medias y Bandas
         if 'EMA20' in df.columns:
             fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
         
-        if bbu in df.columns and bbl in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df[bbu], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df[bbl], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
+        # Usamos iloc para las bandas para evitar errores de nombre
+        fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
 
         # 3. Marcadores
-        fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="SEÑAL COMPRA"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="ALERTA VENTA"), row=1, col=1)
+        if not buy_signals.empty:
+            fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="COMPRA"), row=1, col=1)
+        if not sell_signals.empty:
+            fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="VENTA"), row=1, col=1)
 
         # 4. RSI
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-        fig.update_layout(title=f"🔬 Análisis Técnico Profundo: {ticker}", template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
+        fig.update_layout(title=f"🔬 Análisis Técnico: {ticker}", template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
         return fig
     except Exception as e:
         st.error(f"Error graficando {ticker}: {e}")
         return None
 
 # --- INTERFAZ ---
-st.title("🎯 Sistema Quant V28.1: The Sniper Scope")
+st.title("🎯 Sistema Quant V28.2: The Sniper Scope")
 
 col_radar, col_chart = st.columns([1, 3])
 
