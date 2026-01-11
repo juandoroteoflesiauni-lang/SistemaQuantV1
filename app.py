@@ -9,16 +9,29 @@ import google.generativeai as genai
 import feedparser
 import warnings
 import numpy as np
+import os
+import toml
 
 warnings.filterwarnings('ignore')
 
-# --- 🔐 CREDENCIALES ---
-TELEGRAM_TOKEN = "8042406069:AAHhflfkySyQVhCkHaqIsUjGumFr3fsnDPM" 
-TELEGRAM_CHAT_ID = "6288094504"
-GOOGLE_API_KEY = "AIzaSyB356Wjicaf9VRUYTX6_EL728IQF6nOmuQ" 
+# --- 🔐 CREDENCIALES (MODO MANUAL ROBUSTO) ---
+try:
+    secrets_path = ".streamlit/secrets.toml"
+    if os.path.exists(secrets_path):
+        secrets = toml.load(secrets_path)
+        TELEGRAM_TOKEN = secrets["TELEGRAM_TOKEN"]
+        TELEGRAM_CHAT_ID = secrets["TELEGRAM_CHAT_ID"]
+        GOOGLE_API_KEY = secrets["GOOGLE_API_KEY"]
+    else:
+        TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
+        TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+        GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except Exception as e:
+    st.error(f"❌ Error leyendo claves: {e}")
+    st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V25.2 (Robust)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Sistema Quant V25.3 (Stable)", layout="wide", page_icon="🛡️")
 st.markdown("""
 <style>
     .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; color: white;}
@@ -34,7 +47,7 @@ except: pass
 # --- ACTIVOS ---
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'JPM']
 
-st.title("🛡️ Sistema Quant V25.2: Motor de Inferencia")
+st.title("🛡️ Sistema Quant V25.3: Stable Edition")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -50,20 +63,26 @@ with st.sidebar:
 @st.cache_data(ttl=1800)
 def obtener_datos_completos(tickers):
     try:
-        # Descarga optimizada
         df_prices = yf.download(" ".join(tickers), period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
     except: return None, None
 
     resumen = []
+    
+    # Verificación de seguridad: si df_prices está vacío o falló
+    if df_prices is None or df_prices.empty:
+        return None, None
+
     progress_bar = st.progress(0)
     step = 1.0 / len(tickers)
     
     for i, t in enumerate(tickers):
         try:
             if len(tickers) > 1:
+                # Verificamos si el ticker está en las columnas
                 if t not in df_prices.columns.levels[0]: continue
                 df = df_prices[t].copy().dropna()
-            else: df = df_prices.copy().dropna()
+            else: 
+                df = df_prices.copy().dropna()
 
             if len(df) < 50: continue
             
@@ -100,7 +119,6 @@ def obtener_fundamental_inferido(ticker):
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # 1. Recuperación de Datos Crudos (Con protección contra None)
         pe = info.get('trailingPE') or info.get('forwardPE') or 0
         peg_oficial = info.get('pegRatio')
         growth_est = info.get('earningsGrowth') or info.get('revenueGrowth') or 0
@@ -109,7 +127,6 @@ def obtener_fundamental_inferido(ticker):
         target = info.get('targetMeanPrice') or 0
         sector = info.get('sector') or 'N/A'
 
-        # 2. Motor de Inferencia (Si falta PEG, lo calculamos)
         peg_final = 0
         peg_source = "N/A"
 
@@ -117,23 +134,15 @@ def obtener_fundamental_inferido(ticker):
             peg_final = peg_oficial
             peg_source = "Yahoo Oficial"
         elif pe > 0 and growth_est > 0:
-            # Fórmula: PEG = PER / (Crecimiento * 100)
             peg_final = pe / (growth_est * 100)
             peg_source = "Calculado (Inferencia)"
         
         return {
-            "PER": pe,
-            "PEG": peg_final,
-            "PEG_Source": peg_source,
-            "Growth": growth_est,
-            "P/B": pb,
-            "Beta": beta,
-            "Target Price": target,
-            "Sector": sector,
-            "Raw Info": info # Guardamos todo por si acaso
+            "PER": pe, "PEG": peg_final, "PEG_Source": peg_source,
+            "Growth": growth_est, "P/B": pb, "Beta": beta,
+            "Target Price": target, "Sector": sector, "Raw Info": info
         }
-    except Exception as e:
-        return None
+    except: return None
 
 # --- EJECUCIÓN ---
 df_radar, df_raw_prices = obtener_datos_completos(WATCHLIST)
@@ -142,6 +151,7 @@ df_radar, df_raw_prices = obtener_datos_completos(WATCHLIST)
 tabs = st.tabs(["📡 Radar & Fundamental", "🕸️ Correlaciones", "🛡️ Operativa", "🧪 Laboratorio"])
 
 with tabs[0]:
+    # CORRECCIÓN AQUÍ: Verificamos si es None ANTES de verificar si es empty
     if df_radar is not None and not df_radar.empty:
         col_main, col_detail = st.columns([2, 1])
         
@@ -159,7 +169,7 @@ with tabs[0]:
             )
             
         with col_detail:
-            st.subheader("🔬 Rayos X Fundamental (V2)")
+            st.subheader("🔬 Rayos X Fundamental")
             sel_fund = st.selectbox("Analizar Activo:", df_radar['Ticker'].tolist())
             
             if st.button(f"🔍 Escanear {sel_fund}"):
@@ -168,17 +178,12 @@ with tabs[0]:
                     
                     if fund_data:
                         st.info(f"Sector: **{fund_data['Sector']}**")
-                        
-                        # Métricas
                         c1, c2 = st.columns(2)
                         c1.metric("PER", f"{fund_data['PER']:.2f}x")
-                        
-                        # PEG con indicación de origen
                         peg_val = fund_data['PEG']
                         delta_color = "normal" if 0 < peg_val < 1.5 else "inverse"
                         c2.metric("PEG Ratio", f"{peg_val:.2f}", fund_data['PEG_Source'], delta_color=delta_color)
                         
-                        # Target
                         c3, c4 = st.columns(2)
                         target = fund_data['Target Price']
                         try:
@@ -186,19 +191,17 @@ with tabs[0]:
                             upside = ((target - actual) / actual) * 100 if target > 0 else 0
                             c3.metric("Target Analistas", f"${target}", f"{upside:.1f}% Upside")
                         except: c3.metric("Target", "N/A")
-                            
                         c4.metric("Beta", f"{fund_data['Beta']:.2f}")
 
-                        # Debugger Expandible (Para ver qué pasa)
-                        with st.expander("🛠️ Ver Datos Crudos (Debug)"):
-                            st.write("Si el PEG sigue siendo 0, es porque Yahoo no tiene ni PER ni Crecimiento Estimado para esta acción hoy.")
+                        with st.expander("🛠️ Debug"):
                             st.json(fund_data)
-                    else:
-                        st.error("Error obteniendo fundamentales.")
+                    else: st.error("Error obteniendo fundamentales.")
+    else:
+        st.warning("⚠️ No se pudieron descargar datos. Revisa tu conexión a internet o intenta refrescar.")
 
 with tabs[1]:
     st.subheader("🕸️ Matriz de Riesgo")
-    if df_raw_prices is not None:
+    if df_raw_prices is not None and not df_raw_prices.empty:
         close_df = pd.DataFrame()
         for t in WATCHLIST:
             try:
@@ -215,13 +218,15 @@ with tabs[1]:
 
 with tabs[2]:
     st.subheader("🛡️ Calculadora")
-    if not df_radar.empty:
+    # CORRECCIÓN CRÍTICA AQUÍ: El error estaba en esta línea
+    if df_radar is not None and not df_radar.empty:
         tk = st.selectbox("Activo", df_radar['Ticker'].tolist(), key="calc")
         row = df_radar[df_radar['Ticker'] == tk].iloc[0]
         stop = row['Precio'] - (2 * row['ATR'])
         shares = (capital_total * riesgo_pct / 100) / (row['Precio'] - stop)
         st.metric("Comprar", f"{int(shares)} Acciones", f"Stop Loss: ${stop:.2f}")
+    else:
+        st.info("Esperando datos del mercado...")
 
 with tabs[3]:
     st.info("Laboratorio disponible.")
-
