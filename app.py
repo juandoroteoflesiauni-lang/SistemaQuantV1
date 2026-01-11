@@ -1,4 +1,3 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
@@ -12,7 +11,7 @@ import os
 import toml
 import sqlite3
 import math
-import feedparser # <--- LIBRERÍA NUEVA PARA NOTICIAS
+import feedparser 
 from datetime import datetime
 from scipy.signal import argrelextrema 
 from sklearn.model_selection import train_test_split
@@ -21,6 +20,7 @@ from sklearn.metrics import r2_score
 from scipy.optimize import minimize 
 from scipy.stats import norm 
 import google.generativeai as genai
+from fpdf import FPDF # <--- LIBRERÍA NUEVA PARA PDF
 
 # --- CONFIGURACIÓN MOTOR HÍBRIDO ---
 try:
@@ -49,13 +49,12 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN PÁGINA ---
-st.set_page_config(page_title="Sistema Quant V44 (News Reader)", layout="wide", page_icon="📰")
+st.set_page_config(page_title="Sistema Quant V45 (Auditor)", layout="wide", page_icon="🖨️")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
     .signal-box {border: 2px solid #FFD700; padding: 10px; border-radius: 5px; background-color: #2b2b00; text-align: center;}
     .macro-card {background-color: #1e2130; padding: 10px; border-radius: 5px; text-align: center; border: 1px solid #444;}
-    .news-card {background-color: #1a1c24; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #4CAF50;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -114,64 +113,85 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE NOTICIAS & SENTIMIENTO IA (NUEVO V44) ---
-@st.cache_data(ttl=3600) # Cache de 1 hora para no gastar API
+# --- MOTOR PDF (THE AUDITOR V45) ---
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'Informe de Auditoria Quant V45', 0, 1, 'C')
+        self.set_font('Arial', 'I', 10)
+        self.cell(0, 10, f'Fecha de Corte: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 0, 1, 'C')
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
+
+def generar_pdf_cartera(df_pos):
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    # 1. Resumen Ejecutivo
+    total_equity = df_pos['Valor Mercado'].sum()
+    total_pnl = df_pos['P&L ($)'].sum()
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. Resumen Ejecutivo", 0, 1)
+    pdf.set_font("Arial", size=12)
+    pdf.cell(0, 10, f"Patrimonio Total Gestionado: USD {total_equity:,.2f}", 0, 1)
+    pdf.cell(0, 10, f"Resultado Neto (P&L): USD {total_pnl:,.2f}", 0, 1)
+    pdf.ln(10)
+    
+    # 2. Detalle de Posiciones (Tabla)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. Detalle de Activos", 0, 1)
+    
+    # Encabezados Tabla
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(30, 10, "Ticker", 1)
+    pdf.cell(30, 10, "Cantidad", 1)
+    pdf.cell(40, 10, "Precio Mkt", 1)
+    pdf.cell(40, 10, "Valor Total", 1)
+    pdf.cell(40, 10, "P&L", 1)
+    pdf.ln()
+    
+    # Filas
+    pdf.set_font("Arial", size=10)
+    for index, row in df_pos.iterrows():
+        pdf.cell(30, 10, str(row['Ticker']), 1)
+        pdf.cell(30, 10, str(row['Cantidad']), 1)
+        pdf.cell(40, 10, f"${row['Valor Mercado']/row['Cantidad']:.2f}", 1) # Precio Unitario aprox
+        pdf.cell(40, 10, f"${row['Valor Mercado']:.2f}", 1)
+        pdf.cell(40, 10, f"${row['P&L ($)']:.2f}", 1)
+        pdf.ln()
+        
+    pdf.ln(10)
+    pdf.set_font("Arial", 'I', 8)
+    pdf.cell(0, 10, "Este documento fue generado automaticamente por el Sistema Quant V45.", 0, 1)
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- MOTORES EXISTENTES ---
+@st.cache_data(ttl=3600)
 def analizar_noticias_ia(ticker):
     try:
-        # 1. Obtener Noticias de Google News (RSS)
         rss_url = f"https://news.google.com/rss/search?q={ticker}+stock+finance&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(rss_url)
-        
         if not feed.entries: return None
-        
-        # Tomamos los 5 titulares más recientes
         headlines = [entry.title for entry in feed.entries[:5]]
         links = [entry.link for entry in feed.entries[:5]]
-        
-        # 2. Análisis con Gemini IA
-        prompt = f"""
-        Actúa como un analista financiero senior. Analiza estos titulares sobre {ticker}:
-        {headlines}
-        
-        1. Resume el sentimiento general en un párrafo corto en español.
-        2. Dame una puntuación de sentimiento del -100 (Muy Bajista/Miedo) al +100 (Muy Alcista/Euforia).
-        3. Clasifica el sentimiento en una palabra: 'ALCISTA', 'BAJISTA' o 'NEUTRAL'.
-        
-        Formato de respuesta:
-        SENTIMIENTO: [Puntuación]
-        CLASIFICACION: [Clasificación]
-        RESUMEN: [Resumen]
-        """
-        
-        response = model.generate_content(prompt)
-        text = response.text
-        
-        # Parsing básico de la respuesta (Buscamos las palabras clave)
-        score = 0
-        clasificacion = "NEUTRAL"
-        resumen = text
-        
-        # Extracción simple de datos
+        prompt = f"Analiza estos titulares sobre {ticker}: {headlines}. 1. Score (-100 a 100). 2. Clasificacion (ALCISTA/BAJISTA). 3. Resumen corto. Formato: SENTIMIENTO: [Score] CLASIFICACION: [Class] RESUMEN: [Text]"
+        response = model.generate_content(prompt); text = response.text
+        score = 0; resumen = text
         for line in text.split('\n'):
-            if "SENTIMIENTO:" in line:
-                try: score = int(line.split(":")[1].strip())
+            if "SENTIMIENTO:" in line: 
+                try: score = int(line.split(":")[1].strip()) 
                 except: pass
-            if "CLASIFICACION:" in line:
-                clasificacion = line.split(":")[1].strip()
-            if "RESUMEN:" in line:
-                resumen = line.split("RESUMEN:")[1].strip()
+            if "RESUMEN:" in line: resumen = line.split("RESUMEN:")[1].strip()
+        return {"headlines": headlines, "links": links, "score": score, "summary": resumen}
+    except: return None
 
-        return {
-            "headlines": headlines,
-            "links": links,
-            "score": score,
-            "class": clasificacion,
-            "summary": text # Mostramos el texto completo de la IA por si el parsing falla
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-# --- MOTORES EXISTENTES (Macro, Valuación, etc) ---
 @st.cache_data(ttl=3600)
 def calcular_valor_intrinseco(ticker):
     try:
@@ -295,7 +315,7 @@ def ejecutar_backtest_pro(ticker, capital, estrategia, params):
     except: return None
 
 # --- INTERFAZ ---
-st.title("📰 Sistema Quant V44: News Reader")
+st.title("🖨️ Sistema Quant V45: The Auditor")
 
 # 1. CINTA MACRO
 macro_data = obtener_datos_macro()
@@ -320,6 +340,21 @@ with c_left:
     if not df_pos.empty:
         st.metric("P&L Total", f"${df_pos['P&L ($)'].sum():+.2f}", delta_color="normal")
         st.dataframe(df_pos[['Ticker', 'P&L (%)']])
+        
+        # BOTÓN DE REPORTE PDF V45
+        st.write("---")
+        if st.button("🖨️ GENERAR INFORME PDF"):
+            try:
+                pdf_bytes = generar_pdf_cartera(df_pos)
+                st.download_button(
+                    label="📥 Descargar PDF Auditoría",
+                    data=pdf_bytes,
+                    file_name=f"Reporte_Quant_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf"
+                )
+                st.success("¡Informe Generado!")
+            except Exception as e:
+                st.error(f"Error generando PDF: {e}")
 
     with st.expander("📝 Operar"):
         op_tk = st.selectbox("Ticker", WATCHLIST, key='op_tk')
@@ -332,41 +367,15 @@ with c_left:
 with c_right:
     tabs = st.tabs(["📰 Noticias & IA", "💎 Valuación", "🆚 Alpha", "🔮 Monte Carlo", "📈 Gráfico", "🔥 Heatmap"])
     
-    # PESTAÑA 1: NOTICIAS IA (NUEVA V44)
     with tabs[0]:
-        st.subheader(f"📰 Sentimiento del Mercado: {tk}")
-        
-        if st.button("🤖 ANALIZAR NOTICIAS CON IA"):
-            with st.spinner("Leyendo las noticias globales... (Esto toma unos segundos)"):
+        st.subheader(f"📰 Sentimiento: {tk}")
+        if st.button("🤖 ANALIZAR"):
+            with st.spinner("Analizando..."):
                 news_data = analizar_noticias_ia(tk)
-                
-                if news_data and "error" not in news_data:
-                    # GAUGE DE SENTIMIENTO
-                    score = news_data.get('score', 0)
-                    color_gauge = "grey"
-                    if score > 20: color_gauge = "green"
-                    elif score < -20: color_gauge = "red"
-                    
-                    c1, c2 = st.columns([1, 3])
-                    with c1:
-                        st.markdown(f"""
-                        <div style="text-align:center; padding:20px; background-color:{color_gauge}; border-radius:10px;">
-                            <h1 style="color:white; margin:0;">{score}</h1>
-                            <p style="color:white; margin:0;">SCORE IA (-100 a +100)</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with c2:
-                        st.info("💡 " + news_data.get('summary', 'Sin resumen'))
-                    
-                    st.divider()
-                    st.markdown("### 🗞️ Titulares Analizados")
-                    for i, head in enumerate(news_data['headlines']):
-                        st.markdown(f"- [{head}]({news_data['links'][i]})")
-                        
-                else:
-                    st.error("No se pudieron obtener noticias recientes o hubo un error con la IA.")
-                    if news_data: st.write(news_data)
+                if news_data:
+                    st.info("💡 " + news_data.get('summary', ''))
+                    st.markdown("### Titulares")
+                    for i, head in enumerate(news_data['headlines']): st.markdown(f"- [{head}]({news_data['links'][i]})")
 
     with tabs[1]:
         val_data = calcular_valor_intrinseco(tk)
@@ -374,8 +383,8 @@ with c_right:
             c1, c2 = st.columns(2)
             c1.metric("Precio", f"${val_data['Precio']:.2f}")
             c1.metric("Graham", f"${val_data['Graham']:.2f}", f"{val_data['Diff']:.1f}%")
-            if val_data['Status_Graham'] == "INFRAVALORADA 🟢": st.success("BARATA (Graham)")
-            else: st.error("CARA (Graham)")
+            if val_data['Status_Graham'] == "INFRAVALORADA 🟢": st.success("BARATA")
+            else: st.error("CARA")
 
     with tabs[2]:
         norm_data, metrics = calcular_alpha_beta(tk)
