@@ -59,31 +59,62 @@ def obtener_macro():
     # Descargar SPY (Mercado) y VIX (Miedo)
     tickers = ["SPY", "^VIX"] + list(SECTORS.keys())
     try:
-        data = yf.download(tickers, period="6mo", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
+        # ⚠️ CAMBIO CRÍTICO: period="2y" (Necesario para EMA200)
+        data = yf.download(tickers, period="2y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
     except: return None, None
     
     # Analizar SPY
-    spy = data["SPY"].copy().dropna()
-    spy['EMA200'] = ta.ema(spy['Close'], 200)
-    spy_trend = "ALCISTA 🟢" if spy['Close'].iloc[-1] > spy['EMA200'].iloc[-1] else "BAJISTA 🔴"
+    try:
+        spy = data["SPY"].copy()
+        # Limpieza de datos (convierte todo a numérico y borra vacíos)
+        spy = spy.apply(pd.to_numeric, errors='coerce').dropna()
+        
+        # Validación de longitud
+        if len(spy) < 200:
+            spy_trend = "NEUTRAL (Faltan datos)"
+        else:
+            spy['EMA200'] = ta.ema(spy['Close'], 200)
+            
+            # Protección contra valores nulos
+            last_price = spy['Close'].iloc[-1]
+            last_ema = spy['EMA200'].iloc[-1]
+            
+            if pd.isna(last_ema):
+                spy_trend = "CALCULANDO..."
+            else:
+                spy_trend = "ALCISTA 🟢" if last_price > last_ema else "BAJISTA 🔴"
+    except Exception as e:
+        spy_trend = "ERROR DATA"
     
     # Analizar VIX
-    vix = data["^VIX"]['Close'].iloc[-1]
-    market_mood = "NORMAL"
-    if vix > 30: market_mood = "PÁNICO EXTREMO 😱"
-    elif vix > 20: market_mood = "MIEDO 😨"
-    elif vix < 15: market_mood = "COMPLACENCIA (Bajo Riesgo) 😎"
+    try:
+        # Manejo seguro de VIX
+        vix_series = data["^VIX"]['Close'].dropna()
+        if not vix_series.empty:
+            vix = vix_series.iloc[-1]
+            market_mood = "NORMAL"
+            if vix > 30: market_mood = "PÁNICO EXTREMO 😱"
+            elif vix > 20: market_mood = "MIEDO 😨"
+            elif vix < 15: market_mood = "COMPLACENCIA 😎"
+        else:
+            vix = 0
+            market_mood = "N/A"
+    except:
+        vix = 0
+        market_mood = "N/A"
     
     # Analizar Sectores (Performance 5 días)
     sec_perf = []
     for ticker, name in SECTORS.items():
         try:
-            df = data[ticker].dropna()
-            change = (df['Close'].iloc[-1] - df['Close'].iloc[-6]) / df['Close'].iloc[-6] * 100
-            sec_perf.append({"Sector": name, "Retorno 1S": change})
+            if ticker in data:
+                df = data[ticker].dropna()
+                if len(df) >= 6:
+                    change = (df['Close'].iloc[-1] - df['Close'].iloc[-6]) / df['Close'].iloc[-6] * 100
+                    sec_perf.append({"Sector": name, "Retorno 1S": change})
         except: continue
         
-    return {"spy_trend": spy_trend, "vix": vix, "mood": market_mood}, pd.DataFrame(sec_perf)
+    return {"spy_trend": spy_trend, "vix": vix, "mood": market_mood}, pd.DataFrame(sec_perf))
 
 @st.cache_data(ttl=300)
 def escanear_acciones(tickers):
@@ -211,3 +242,4 @@ with tab_trade:
                     res = model.generate_content(prompt)
                     st.write(res.text)
                 except: st.error("Error IA")
+
