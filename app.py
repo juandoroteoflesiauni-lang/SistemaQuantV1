@@ -156,4 +156,58 @@ with tab_radar:
         df_radar = df_radar.sort_values(by="Score", ascending=False)
         
         # Formato visual
-        def color_score
+        def color_score(val):
+            color = '#90ee90' if val > 70 else '#ffcccb' if val < 30 else ''
+            return f'background-color: {color}; color: black'
+
+        st.dataframe(
+            df_radar.style.applymap(color_score, subset=['Score'])
+            .format({"Precio": "${:.2f}", "RSI": "{:.1f}", "ATR": "{:.2f}"}),
+            use_container_width=True, height=600
+        )
+        
+        mejor_opcion = df_radar.iloc[0]
+    else:
+        st.warning("No se pudieron cargar los datos del radar.")
+
+with tab_trade:
+    st.subheader("🛡️ Calculadora de Riesgo (Risk Manager)")
+    
+    if 'mejor_opcion' in locals():
+        ticker_sel = st.selectbox("Activo a Operar", df_radar['Ticker'].tolist())
+        row = df_radar[df_radar['Ticker'] == ticker_sel].iloc[0]
+        
+        # Lógica de Riesgo
+        precio = row['Precio']
+        atr = row['ATR']
+        stop_loss = precio - (2 * atr)
+        distancia = precio - stop_loss
+        riesgo_usd = capital_total * (riesgo_pct / 100)
+        
+        qty = riesgo_usd / distancia if distancia > 0 else 0
+        inversion = qty * precio
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.info(f"📊 **Datos de {ticker_sel}**")
+            st.write(f"Precio Entrada: **${precio:.2f}**")
+            st.write(f"Stop Loss (2xATR): **${stop_loss:.2f}**")
+            st.write(f"Distancia Stop: **${distancia:.2f}** por acción")
+        
+        with c2:
+            st.success(f"💰 **Tamaño de Posición Seguro**")
+            st.metric("Riesgo Permitido", f"${riesgo_usd:.2f}")
+            st.metric("CANTIDAD A COMPRAR", f"{int(qty)} Acciones")
+            st.caption(f"Inversión total requerida: ${inversion:,.2f}")
+            
+            if inversion > capital_total:
+                st.error("⚠️ No tienes suficiente capital para tomar este trade con ese Stop Loss.")
+        
+        # Botón IA para validar trade
+        if st.button(f"🧠 Consultar a IA sobre {ticker_sel}"):
+            with st.spinner("Analizando..."):
+                try:
+                    prompt = f"Analiza {ticker_sel}. Precio ${precio}. RSI {row['RSI']}. Tendencia {row['Tendencia']}. ¿Es buen momento para comprar? Responde breve."
+                    res = model.generate_content(prompt)
+                    st.write(res.text)
+                except: st.error("Error IA")
