@@ -18,13 +18,7 @@ import re
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
-# Intentamos importar PyPortfolioOpt, si no está, usamos modo fallback
-try:
-    from pypfopt import EfficientFrontier, risk_models, expected_returns
-    from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
-    HAVE_PYPFOPT = True
-except ImportError:
-    HAVE_PYPFOPT = False
+from scipy.optimize import minimize # <--- Usamos esto en lugar de PyPortfolioOpt
 
 warnings.filterwarnings('ignore')
 
@@ -43,7 +37,7 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V31 (Architect)", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Sistema Quant V31.1 (Native)", layout="wide", page_icon="🏛️")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
@@ -195,57 +189,73 @@ def predecir_precio_ia(ticker):
         return future_price, score, last_row['Close']
     except: return None
 
-# --- MOTOR DE OPTIMIZACIÓN V31 ---
-def optimizar_portafolio(tickers_list, capital_invertir):
-    if not HAVE_PYPFOPT:
-        return None, "Librería PyPortfolioOpt no instalada."
-    
+# --- MOTOR DE OPTIMIZACIÓN NATIVO (SCIPY) V31.1 ---
+def optimizar_portafolio_nativo(tickers_list, capital_invertir):
     try:
-        # Descarga Masiva Blindada
+        # 1. Descargar Precios Históricos (Blindado)
         df = yf.download(tickers_list, period="2y", progress=False, auto_adjust=True)['Close']
-        if df.empty: return None, "No hay datos."
+        if df.empty: return None, "Sin datos."
         
-        # Matemáticas Financieras
-        mu = expected_returns.mean_historical_return(df) # Retorno Esperado
-        S = risk_models.sample_cov(df) # Matriz de Covarianza (Riesgo)
+        # 2. Retornos Logarítmicos
+        log_ret = np.log(df/df.shift(1))
         
-        # Frontera Eficiente (Sharpe Ratio)
-        ef = EfficientFrontier(mu, S)
-        weights = ef.max_sharpe() # Maximizar Retorno/Riesgo
-        cleaned_weights = ef.clean_weights()
+        # 3. Funciones Matemáticas (Sharpe Negativo para minimizar)
+        def get_ret_vol_sr(weights):
+            weights = np.array(weights)
+            ret = np.sum(log_ret.mean() * weights) * 252
+            vol = np.sqrt(np.dot(weights.T, np.dot(log_ret.cov() * 252, weights)))
+            sr = ret/vol
+            return np.array([ret, vol, sr])
         
-        # Resultados de Performance
-        perf = ef.portfolio_performance(verbose=False)
-        retorno_esp = perf[0]
-        volatilidad_esp = perf[1]
-        sharpe = perf[2]
+        def neg_sharpe(weights):
+            return -get_ret_vol_sr(weights)[2]
+
+        # 4. Optimización (Minimizar el Sharpe Negativo)
+        cons = ({'type':'eq','fun': lambda x: np.sum(x) - 1}) # Restricción: Suma de pesos = 1
+        bounds = tuple((0, 1) for _ in range(len(tickers_list))) # Límites: 0% a 100% por activo
+        init_guess = [1/len(tickers_list)] * len(tickers_list) # Inicio: Todos iguales
         
-        # Asignación Discreta (Cuántas acciones comprar)
-        latest_prices = get_latest_prices(df)
-        da = DiscreteAllocation(cleaned_weights, latest_prices, total_portfolio_value=capital_invertir)
-        allocation, leftover = da.greedy_portfolio()
+        opt_results = minimize(neg_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
+        
+        # 5. Resultados
+        best_weights = opt_results.x
+        ret, vol, sr = get_ret_vol_sr(best_weights)
+        
+        # Formatear Salida
+        weights_dict = {ticker: weight for ticker, weight in zip(tickers_list, best_weights)}
+        
+        # Asignación de Capital
+        latest_prices = df.iloc[-1]
+        allocation = {}
+        leftover = capital_invertir
+        
+        for t, w in weights_dict.items():
+            if w > 0.01: # Solo mostrar si es > 1%
+                money = capital_invertir * w
+                qty = int(money / latest_prices[t])
+                cost = qty * latest_prices[t]
+                allocation[t] = qty
+                leftover -= cost
         
         return {
-            "weights": cleaned_weights,
+            "weights": weights_dict,
             "allocation": allocation,
-            "metrics": [retorno_esp, volatilidad_esp, sharpe],
+            "metrics": [ret, vol, sr],
             "leftover": leftover
         }, "OK"
-        
+
     except Exception as e:
-        return None, str(e)
+        return None, f"Error Matemático: {str(e)}"
 
 # --- INTERFAZ ---
-st.title("🏛️ Sistema Quant V31: The Architect")
+st.title("🏛️ Sistema Quant V31.1: Native Architect")
 
 col_left, col_right = st.columns([1, 2.5])
 
 with col_left:
     st.subheader("Radar")
-    # Configuración Global
     with st.expander("⚙️ Fondos"):
         capital = st.number_input("Capital Total ($)", 2000, 100000, 10000, step=500, key='capital')
-        st.caption("Usado para cálculos de portafolio.")
 
     if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
     
@@ -257,24 +267,19 @@ with col_left:
     else: st.stop()
 
 with col_right:
-    # SISTEMA DE PESTAÑAS
     tabs = st.tabs(["⚖️ Optimizador", "🧠 IA Predictiva", "📈 Gráfico", "🔬 Fundamental", "🚀 Señal"])
     
-    # TAB 1: OPTIMIZADOR DE PORTAFOLIO (V31)
+    # TAB 1: OPTIMIZADOR NATIVO
     with tabs[0]:
-        st.subheader("⚖️ Teoría Moderna de Portafolios (Markowitz)")
-        st.write("Calcula la combinación matemática perfecta para maximizar ganancias y minimizar riesgo.")
-        
-        if not HAVE_PYPFOPT:
-            st.error("⚠️ Falta la librería `PyPortfolioOpt`. Instálala o este módulo no funcionará.")
-            st.code("pip install PyPortfolioOpt")
+        st.subheader("⚖️ Portafolio Óptimo (Motor Scipy Nativo)")
+        st.write("Cálculo matemático directo (Sin dependencias externas) para maximizar Ratio Sharpe.")
         
         col_opt1, col_opt2 = st.columns([1, 2])
         with col_opt1:
             assets_to_opt = st.multiselect("Activos a incluir:", WATCHLIST, default=WATCHLIST[:5])
-            if st.button("🧮 CALCULAR PORTAFOLIO ÓPTIMO"):
-                with st.spinner("Optimizando Frontera Eficiente..."):
-                    res_opt, msg_opt = optimizar_portafolio(assets_to_opt, capital)
+            if st.button("🧮 CALCULAR ASIGNACIÓN"):
+                with st.spinner("Optimizando Matemáticas..."):
+                    res_opt, msg_opt = optimizar_portafolio_nativo(assets_to_opt, capital)
                     
                     if res_opt:
                         st.session_state['opt_result'] = res_opt
@@ -286,26 +291,24 @@ with col_right:
                 res = st.session_state['opt_result']
                 metrics = res['metrics']
                 
-                # Métricas del Portafolio
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Retorno Anual Est.", f"{metrics[0]*100:.1f}%")
-                c2.metric("Volatilidad (Riesgo)", f"{metrics[1]*100:.1f}%")
+                c1.metric("Retorno Anual", f"{metrics[0]*100:.1f}%")
+                c2.metric("Riesgo (Vol)", f"{metrics[1]*100:.1f}%")
                 c3.metric("Sharpe Ratio", f"{metrics[2]:.2f}")
                 
-                # Gráfico de Torta (Asignación)
                 clean_w = {k: v for k, v in res['weights'].items() if v > 0.01}
-                fig_pie = px.pie(values=list(clean_w.values()), names=list(clean_w.keys()), title="Asignación de Capital Ideal")
+                fig_pie = px.pie(values=list(clean_w.values()), names=list(clean_w.keys()), title="Distribución Óptima de Capital")
                 st.plotly_chart(fig_pie, use_container_width=True)
                 
-                # Lista de Compras
-                st.markdown("### 🛒 Lista de Compras (Orden Ejecutiva)")
-                alloc_df = pd.DataFrame.from_dict(res['allocation'], orient='index', columns=['Cantidad'])
-                st.dataframe(alloc_df)
+                st.markdown("### 🛒 Orden de Compra Sugerida")
+                if res['allocation']:
+                    alloc_df = pd.DataFrame.from_dict(res['allocation'], orient='index', columns=['Acciones'])
+                    st.dataframe(alloc_df)
+                else: st.warning("Capital insuficiente para comprar 1 acción entera.")
                 st.info(f"💰 Cash sobrante: ${res['leftover']:.2f}")
 
-    # TAB 2: IA PREDICTIVA (V30.1)
     with tabs[1]:
-        if st.button("🔮 PREDICCIÓN INDIVIDUAL"):
+        if st.button("🔮 PREDICCIÓN IA"):
             res_ia = predecir_precio_ia(selected_ticker)
             if res_ia:
                 pred, acc, curr = res_ia
