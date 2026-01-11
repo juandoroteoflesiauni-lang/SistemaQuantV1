@@ -53,32 +53,31 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# --- MOTORES DE DATOS ---
+# --- MOTORES DE DATOS (CORREGIDO) ---
 @st.cache_data(ttl=900) # 15 min cache para macro
 def obtener_macro():
     # Descargar SPY (Mercado) y VIX (Miedo)
     tickers = ["SPY", "^VIX"] + list(SECTORS.keys())
     try:
-        # ⚠️ CAMBIO CRÍTICO: period="2y" (Necesario para EMA200)
+        # Descargamos 2 años para asegurar que la EMA200 se pueda calcular sin error
         data = yf.download(tickers, period="2y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
     except: return None, None
     
-    # Analizar SPY
+    # --- 1. Analizar SPY ---
     try:
         spy = data["SPY"].copy()
-        # Limpieza de datos (convierte todo a numérico y borra vacíos)
+        # Limpiar datos no numéricos
         spy = spy.apply(pd.to_numeric, errors='coerce').dropna()
         
-        # Validación de longitud
         if len(spy) < 200:
             spy_trend = "NEUTRAL (Faltan datos)"
         else:
             spy['EMA200'] = ta.ema(spy['Close'], 200)
             
-            # Protección contra valores nulos
             last_price = spy['Close'].iloc[-1]
             last_ema = spy['EMA200'].iloc[-1]
             
+            # Verificar si la EMA es válida (no es NaN)
             if pd.isna(last_ema):
                 spy_trend = "CALCULANDO..."
             else:
@@ -86,9 +85,8 @@ def obtener_macro():
     except Exception as e:
         spy_trend = "ERROR DATA"
     
-    # Analizar VIX
+    # --- 2. Analizar VIX ---
     try:
-        # Manejo seguro de VIX
         vix_series = data["^VIX"]['Close'].dropna()
         if not vix_series.empty:
             vix = vix_series.iloc[-1]
@@ -103,18 +101,20 @@ def obtener_macro():
         vix = 0
         market_mood = "N/A"
     
-    # Analizar Sectores (Performance 5 días)
+    # --- 3. Analizar Sectores ---
     sec_perf = []
     for ticker, name in SECTORS.items():
         try:
-            if ticker in data:
+            # Verificar si el ticker existe en los datos descargados
+            if ticker in data.columns.levels[0]: 
                 df = data[ticker].dropna()
                 if len(df) >= 6:
+                    # Rendimiento de 5 días (1 semana)
                     change = (df['Close'].iloc[-1] - df['Close'].iloc[-6]) / df['Close'].iloc[-6] * 100
                     sec_perf.append({"Sector": name, "Retorno 1S": change})
         except: continue
         
-    return {"spy_trend": spy_trend, "vix": vix, "mood": market_mood}, pd.DataFrame(sec_perf))
+    return {"spy_trend": spy_trend, "vix": vix, "mood": market_mood}, pd.DataFrame(sec_perf)
 
 @st.cache_data(ttl=300)
 def escanear_acciones(tickers):
@@ -126,7 +126,14 @@ def escanear_acciones(tickers):
     
     for t in tickers:
         try:
-            df = df_bulk[t].copy().dropna()
+            # Manejo flexible de la estructura de yfinance
+            if len(tickers) > 1:
+                if t in df_bulk.columns.levels[0]:
+                    df = df_bulk[t].copy().dropna()
+                else: continue
+            else:
+                df = df_bulk.copy().dropna()
+
             if len(df) < 200: continue
             
             close = df['Close'].iloc[-1]
@@ -154,30 +161,35 @@ def escanear_acciones(tickers):
 tab_macro, tab_radar, tab_trade = st.tabs(["1️⃣ Macro Global", "2️⃣ Radar de Oportunidades", "3️⃣ Ejecución y Riesgo"])
 
 with tab_macro:
-    macro_data, df_sectors = obtener_macro()
-    if macro_data:
-        # Dashboard Macro
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Tendencia S&P 500 (SPY)", macro_data["spy_trend"])
-        c2.metric("Índice del Miedo (VIX)", f"{macro_data['vix']:.2f}", macro_data["mood"])
-        
-        estado_global = "🟢 COMPRAR" if "ALCISTA" in macro_data["spy_trend"] and macro_data['vix'] < 25 else "🔴 PRECAUCIÓN"
-        c3.metric("VEREDICTO GLOBAL", estado_global)
-        
-        st.divider()
-        st.subheader("🔥 Mapa de Calor de Sectores (Última Semana)")
-        
-        # Gráfico de Barras Sectores
-        if not df_sectors.empty:
-            df_sectors = df_sectors.sort_values("Retorno 1S", ascending=False)
-            fig_sec = px.bar(df_sectors, x="Retorno 1S", y="Sector", orientation='h', 
-                             color="Retorno 1S", color_continuous_scale=["red", "yellow", "green"],
-                             title="¿Dónde está fluyendo el dinero?")
-            fig_sec.update_layout(height=400)
-            st.plotly_chart(fig_sec, use_container_width=True)
+    try:
+        macro_data, df_sectors = obtener_macro()
+        if macro_data:
+            # Dashboard Macro
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Tendencia S&P 500 (SPY)", macro_data["spy_trend"])
+            c2.metric("Índice del Miedo (VIX)", f"{macro_data['vix']:.2f}", macro_data["mood"])
             
-            lider = df_sectors.iloc[0]['Sector']
-            st.info(f"💡 Pista: El dinero inteligente está rotando hacia **{lider}**. Busca acciones ahí.")
+            estado_global = "🟢 COMPRAR" if "ALCISTA" in macro_data["spy_trend"] and macro_data['vix'] < 25 else "🔴 PRECAUCIÓN"
+            c3.metric("VEREDICTO GLOBAL", estado_global)
+            
+            st.divider()
+            st.subheader("🔥 Mapa de Calor de Sectores (Última Semana)")
+            
+            # Gráfico de Barras Sectores
+            if not df_sectors.empty:
+                df_sectors = df_sectors.sort_values("Retorno 1S", ascending=False)
+                fig_sec = px.bar(df_sectors, x="Retorno 1S", y="Sector", orientation='h', 
+                                 color="Retorno 1S", color_continuous_scale=["red", "yellow", "green"],
+                                 title="¿Dónde está fluyendo el dinero?")
+                fig_sec.update_layout(height=400)
+                st.plotly_chart(fig_sec, use_container_width=True)
+                
+                lider = df_sectors.iloc[0]['Sector']
+                st.info(f"💡 Pista: El dinero inteligente está rotando hacia **{lider}**. Busca acciones ahí.")
+        else:
+            st.warning("No se pudieron cargar datos Macro. Intenta refrescar.")
+    except Exception as e:
+        st.error(f"Error en módulo Macro: {e}")
 
 with tab_radar:
     st.subheader("📡 Escáner de Oportunidades")
@@ -192,7 +204,7 @@ with tab_radar:
             return f'background-color: {color}; color: black'
 
         st.dataframe(
-            df_radar.style.applymap(color_score, subset=['Score'])
+            df_radar.style.map(color_score, subset=['Score'])
             .format({"Precio": "${:.2f}", "RSI": "{:.1f}", "ATR": "{:.2f}"}),
             use_container_width=True, height=600
         )
@@ -204,13 +216,27 @@ with tab_radar:
 with tab_trade:
     st.subheader("🛡️ Calculadora de Riesgo (Risk Manager)")
     
-    if 'mejor_opcion' in locals():
-        ticker_sel = st.selectbox("Activo a Operar", df_radar['Ticker'].tolist())
-        row = df_radar[df_radar['Ticker'] == ticker_sel].iloc[0]
+    if 'mejor_opcion' in locals(): # Si el radar encontró algo
+        # Selector inteligente: por defecto la mejor opción
+        lista_tickers = df_radar['Ticker'].tolist() if not df_radar.empty else WATCHLIST
+        ticker_sel = st.selectbox("Activo a Operar", lista_tickers)
         
+        # Obtener datos de la fila seleccionada
+        if not df_radar.empty and ticker_sel in df_radar['Ticker'].values:
+            row = df_radar[df_radar['Ticker'] == ticker_sel].iloc[0]
+            precio = row['Precio']
+            atr = row['ATR']
+            rsi_val = row['RSI']
+            trend_val = row['Tendencia']
+        else:
+            # Fallback si no hay datos en el radar (descarga rápida)
+            tmp = yf.download(ticker_sel, period="1mo", progress=False)
+            precio = tmp['Close'].iloc[-1]
+            atr = (tmp['High'] - tmp['Low']).mean() # ATR aproximado simple
+            rsi_val = 50
+            trend_val = "N/A"
+
         # Lógica de Riesgo
-        precio = row['Precio']
-        atr = row['ATR']
         stop_loss = precio - (2 * atr)
         distancia = precio - stop_loss
         riesgo_usd = capital_total * (riesgo_pct / 100)
@@ -238,8 +264,9 @@ with tab_trade:
         if st.button(f"🧠 Consultar a IA sobre {ticker_sel}"):
             with st.spinner("Analizando..."):
                 try:
-                    prompt = f"Analiza {ticker_sel}. Precio ${precio}. RSI {row['RSI']}. Tendencia {row['Tendencia']}. ¿Es buen momento para comprar? Responde breve."
+                    prompt = f"Analiza {ticker_sel}. Precio ${precio}. RSI {rsi_val}. Tendencia {trend_val}. ¿Es buen momento para comprar? Responde breve."
                     res = model.generate_content(prompt)
                     st.write(res.text)
                 except: st.error("Error IA")
-
+    else:
+        st.info("Espera a que el radar cargue datos para usar la calculadora.")
