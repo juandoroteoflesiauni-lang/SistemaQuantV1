@@ -10,3 +10,4 @@ quantstats
 matplotlib
 seaborn
 scikit-learn
+PyPortfolioOpt
