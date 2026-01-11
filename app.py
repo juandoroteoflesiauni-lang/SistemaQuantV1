@@ -183,4 +183,51 @@ def dibujar_velocimetro(score):
                 'value': score}
         }
     ))
-    fig.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor="#
+    fig.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor="#0e1117", font={'color': "white"})
+    return fig
+
+# --- MOTORES EXISTENTES ---
+def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
+    try:
+        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
+        if df.empty: return pd.DataFrame()
+        df['RSI'] = ta.rsi(df['Close'], 14)
+        resultados = []
+        for b in [20, 30, 40]:
+            for s in [60, 70, 80]:
+                cash = 10000; pos = 0
+                buy_sig = df['RSI'] < b; sell_sig = df['RSI'] > s
+                for i in range(15, len(df)):
+                    p = df['Close'].iloc[i]
+                    if cash > 0 and buy_sig.iloc[i]: pos = cash/p; cash = 0
+                    elif pos > 0 and sell_sig.iloc[i]: cash = pos*p; pos = 0
+                final = cash + (pos * df['Close'].iloc[-1])
+                resultados.append({"Compra <": b, "Venta >": s, "Retorno %": ((final-10000)/10000)*100})
+        return pd.DataFrame(resultados)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def generar_mapa_calor(tickers):
+    try:
+        data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
+        pct = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        df = pd.DataFrame({'Ticker': pct.index, 'Variacion': pct.values, 'Precio': data.iloc[-1].values})
+        sec = []
+        for t in df['Ticker']:
+            if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sec.append('Tech')
+            elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sec.append('Cripto')
+            elif t in ['SPY', 'QQQ', 'DIA']: sec.append('Índices')
+            elif t in ['GLD', 'USO']: sec.append('Commodities')
+            else: sec.append('Otros')
+        df['Sector'] = sec; df['Size'] = df['Precio'] 
+        return df
+    except: return None
+
+def graficar_master(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
+        if df.empty: return None
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
+        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
+        fig = make_subplots(rows=2, cols=1,
