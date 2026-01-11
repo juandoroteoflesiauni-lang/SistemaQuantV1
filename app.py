@@ -31,11 +31,12 @@ except Exception as e:
     st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V25.3 (Stable)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Sistema Quant V26 (Commander)", layout="wide", page_icon="🫡")
 st.markdown("""
 <style>
     .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; color: white;}
     .stDataFrame {border: 1px solid #444; border-radius: 5px;}
+    .report-btn {width: 100%; border: 1px solid #00ff00; color: #00ff00;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -47,18 +48,6 @@ except: pass
 # --- ACTIVOS ---
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'JPM']
 
-st.title("🛡️ Sistema Quant V25.3: Stable Edition")
-
-# --- BARRA LATERAL ---
-with st.sidebar:
-    st.header("⚙️ Mesa de Operaciones")
-    capital_total = st.number_input("Capital ($)", value=2000)
-    riesgo_pct = st.slider("Riesgo (%)", 0.5, 3.0, 2.0)
-    st.divider()
-    if st.button("🔄 Forzar Recarga"):
-        st.cache_data.clear()
-        st.rerun()
-
 # --- MOTORES DE DATOS ---
 @st.cache_data(ttl=1800)
 def obtener_datos_completos(tickers):
@@ -68,9 +57,7 @@ def obtener_datos_completos(tickers):
 
     resumen = []
     
-    # Verificación de seguridad: si df_prices está vacío o falló
-    if df_prices is None or df_prices.empty:
-        return None, None
+    if df_prices is None or df_prices.empty: return None, None
 
     progress_bar = st.progress(0)
     step = 1.0 / len(tickers)
@@ -78,11 +65,9 @@ def obtener_datos_completos(tickers):
     for i, t in enumerate(tickers):
         try:
             if len(tickers) > 1:
-                # Verificamos si el ticker está en las columnas
                 if t not in df_prices.columns.levels[0]: continue
                 df = df_prices[t].copy().dropna()
-            else: 
-                df = df_prices.copy().dropna()
+            else: df = df_prices.copy().dropna()
 
             if len(df) < 50: continue
             
@@ -144,60 +129,105 @@ def obtener_fundamental_inferido(ticker):
         }
     except: return None
 
-# --- EJECUCIÓN ---
+# --- COMUNICACIONES (TELEGRAM) ---
+def enviar_telegram(mensaje):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload)
+        return True
+    except: return False
+
+# --- ESTRUCTURA PRINCIPAL ---
+st.title("🫡 Sistema Quant V26: El Comandante")
+
+# Carga de datos inicial
 df_radar, df_raw_prices = obtener_datos_completos(WATCHLIST)
 
-# --- PESTAÑAS ---
-tabs = st.tabs(["📡 Radar & Fundamental", "🕸️ Correlaciones", "🛡️ Operativa", "🧪 Laboratorio"])
+# --- BARRA LATERAL (COMANDOS) ---
+with st.sidebar:
+    st.header("📡 Centro de Mando")
+    capital_total = st.number_input("Capital ($)", value=2000)
+    riesgo_pct = st.slider("Riesgo (%)", 0.5, 3.0, 2.0)
+    
+    st.divider()
+    st.subheader("📢 Reportes")
+    
+    if st.button("🚀 Enviar Informe a Telegram"):
+        if df_radar is not None and not df_radar.empty:
+            with st.spinner("Redactando informe de inteligencia..."):
+                # 1. Encontrar la joya
+                mejor_activo = df_radar.sort_values("Score", ascending=False).iloc[0]
+                ticker = mejor_activo['Ticker']
+                
+                # 2. Análisis Rápido IA
+                prompt = f"""
+                Actúa como un gestor de fondos de Wall Street.
+                Escribe un reporte MUY BREVE (max 3 líneas) para Telegram.
+                
+                Datos:
+                - Top Pick: {ticker} (Score: {mejor_activo['Score']})
+                - Precio: ${mejor_activo['Precio']:.2f}
+                - Tendencia: {mejor_activo['Tendencia']}
+                - RSI: {mejor_activo['RSI']:.1f}
+                
+                Dime si compro o espero y por qué. Usa emojis.
+                """
+                try:
+                    analisis_ia = model.generate_content(prompt).text
+                except: analisis_ia = "Análisis IA no disponible."
+
+                # 3. Formatear Mensaje
+                mensaje = f"""
+🚨 *INFORME QUANT DIARIO* 🚨
+
+📊 *Mejor Oportunidad:* {ticker}
+💰 *Precio:* ${mejor_activo['Precio']:.2f}
+📈 *Tendencia:* {mejor_activo['Tendencia']}
+🎯 *Score:* {mejor_activo['Score']}/100
+
+🧠 *Opinión del Algoritmo:*
+{analisis_ia}
+
+_Generado por Sistema Quant V26_
+                """
+                if enviar_telegram(mensaje):
+                    st.success("✅ ¡Informe enviado a tu celular!")
+                else:
+                    st.error("❌ Error enviando mensaje.")
+        else:
+            st.warning("Espera a que carguen los datos.")
+
+    st.divider()
+    if st.button("🔄 Refrescar Datos"):
+        st.cache_data.clear()
+        st.rerun()
+
+# --- PESTAÑAS PRINCIPALES ---
+tabs = st.tabs(["📡 Radar & Fundamental", "🕸️ Correlaciones", "🛡️ Calculadora", "🧪 Laboratorio"])
 
 with tabs[0]:
-    # CORRECCIÓN AQUÍ: Verificamos si es None ANTES de verificar si es empty
     if df_radar is not None and not df_radar.empty:
         col_main, col_detail = st.columns([2, 1])
-        
         with col_main:
             st.subheader("Radar de Oportunidades")
             df_show = df_radar.sort_values("Score", ascending=False)
-            
-            def color_trend(val):
-                return 'color: lightgreen' if val == "ALCISTA" else 'color: #ffcccb'
-            
-            st.dataframe(
-                df_show.style.map(color_trend, subset=['Tendencia'])
-                             .format({"Precio": "${:.2f}", "RSI": "{:.1f}", "Volatilidad %": "{:.1f}%"}),
-                use_container_width=True, height=500
-            )
-            
+            def color_trend(val): return 'color: lightgreen' if val == "ALCISTA" else 'color: #ffcccb'
+            st.dataframe(df_show.style.map(color_trend, subset=['Tendencia']).format({"Precio": "${:.2f}", "RSI": "{:.1f}", "Volatilidad %": "{:.1f}%"}), use_container_width=True, height=500)
         with col_detail:
-            st.subheader("🔬 Rayos X Fundamental")
+            st.subheader("🔬 Fundamental (Inferencia)")
             sel_fund = st.selectbox("Analizar Activo:", df_radar['Ticker'].tolist())
-            
             if st.button(f"🔍 Escanear {sel_fund}"):
-                with st.spinner("Iniciando motor de inferencia..."):
+                with st.spinner("Analizando..."):
                     fund_data = obtener_fundamental_inferido(sel_fund)
-                    
                     if fund_data:
-                        st.info(f"Sector: **{fund_data['Sector']}**")
                         c1, c2 = st.columns(2)
                         c1.metric("PER", f"{fund_data['PER']:.2f}x")
                         peg_val = fund_data['PEG']
                         delta_color = "normal" if 0 < peg_val < 1.5 else "inverse"
                         c2.metric("PEG Ratio", f"{peg_val:.2f}", fund_data['PEG_Source'], delta_color=delta_color)
-                        
-                        c3, c4 = st.columns(2)
-                        target = fund_data['Target Price']
-                        try:
-                            actual = df_radar[df_radar['Ticker']==sel_fund]['Precio'].values[0]
-                            upside = ((target - actual) / actual) * 100 if target > 0 else 0
-                            c3.metric("Target Analistas", f"${target}", f"{upside:.1f}% Upside")
-                        except: c3.metric("Target", "N/A")
-                        c4.metric("Beta", f"{fund_data['Beta']:.2f}")
-
-                        with st.expander("🛠️ Debug"):
-                            st.json(fund_data)
-                    else: st.error("Error obteniendo fundamentales.")
-    else:
-        st.warning("⚠️ No se pudieron descargar datos. Revisa tu conexión a internet o intenta refrescar.")
+                        st.info(f"Sector: {fund_data['Sector']}")
+                    else: st.error("Error fundamental.")
 
 with tabs[1]:
     st.subheader("🕸️ Matriz de Riesgo")
@@ -205,28 +235,20 @@ with tabs[1]:
         close_df = pd.DataFrame()
         for t in WATCHLIST:
             try:
-                if len(WATCHLIST) > 1 and t in df_raw_prices.columns.levels[0]:
-                    close_df[t] = df_raw_prices[t]['Close']
-                elif len(WATCHLIST) == 1:
-                    close_df[t] = df_raw_prices['Close']
+                if len(WATCHLIST) > 1 and t in df_raw_prices.columns.levels[0]: close_df[t] = df_raw_prices[t]['Close']
+                else: close_df[t] = df_raw_prices['Close']
             except: pass
-            
         if not close_df.empty:
-            corr = close_df.corr()
-            fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(px.imshow(close_df.corr(), text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
 
 with tabs[2]:
     st.subheader("🛡️ Calculadora")
-    # CORRECCIÓN CRÍTICA AQUÍ: El error estaba en esta línea
     if df_radar is not None and not df_radar.empty:
         tk = st.selectbox("Activo", df_radar['Ticker'].tolist(), key="calc")
         row = df_radar[df_radar['Ticker'] == tk].iloc[0]
         stop = row['Precio'] - (2 * row['ATR'])
         shares = (capital_total * riesgo_pct / 100) / (row['Precio'] - stop)
-        st.metric("Comprar", f"{int(shares)} Acciones", f"Stop Loss: ${stop:.2f}")
-    else:
-        st.info("Esperando datos del mercado...")
+        st.metric("Orden Segura", f"{int(shares)} Acciones", f"Stop Loss: ${stop:.2f}")
 
 with tabs[3]:
-    st.info("Laboratorio disponible.")
+    st.info("Laboratorio disponible (código backend).")
