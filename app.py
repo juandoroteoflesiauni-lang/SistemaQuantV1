@@ -230,4 +230,123 @@ def graficar_master(ticker):
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
         bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
-        fig = make_subplots(rows=2, cols=1,
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        try: 
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
+        except: pass
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name="RSI"), row=2, col=1)
+        fig.add_hline(y=70, line_color="red", row=2, col=1); fig.add_hline(y=30, line_color="green", row=2, col=1)
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0))
+        return fig
+    except: return None
+
+@st.cache_data(ttl=300)
+def escanear_oportunidades(tickers):
+    s = []
+    try: data = yf.download(" ".join(tickers), period="3mo", progress=False, group_by='ticker', auto_adjust=True)
+    except: return pd.DataFrame()
+    for t in tickers:
+        try:
+            df = data[t].dropna() if len(tickers) > 1 else data.dropna()
+            if len(df) < 14: continue
+            c = df['Close'].iloc[-1]; r = ta.rsi(df['Close'], 14).iloc[-1]
+            if r < 30: s.append({"Ticker": t, "Señal": "COMPRA RSI 🟢"})
+            elif r > 70: s.append({"Ticker": t, "Señal": "VENTA RSI 🔴"})
+        except: pass
+    return pd.DataFrame(s)
+
+# --- INTERFAZ V51: THE JUDGE ---
+st.title("⚖️ Sistema Quant V51: The Judge")
+
+# DASHBOARD EJECUTIVO
+df_pos = auditar_posiciones_sql()
+df_alerts = escanear_oportunidades(WATCHLIST)
+
+col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+with col_kpi1:
+    equity = df_pos['Valor Mercado'].sum() if not df_pos.empty else 0.0
+    st.metric("Patrimonio Neto", f"${equity:,.2f}")
+with col_kpi2:
+    pnl = df_pos['P&L ($)'].sum() if not df_pos.empty else 0.0
+    st.metric("P&L Total", f"${pnl:+.2f}", delta_color="normal")
+with col_kpi3:
+    st.metric("Oportunidades", str(len(df_alerts) if not df_alerts.empty else 0))
+with col_kpi4:
+    sp500 = yf.Ticker("SPY").history(period="2d")['Close']
+    st.metric("Mercado (SP500)", f"${sp500.iloc[-1]:.2f}")
+
+st.divider()
+
+main_tabs = st.tabs(["💼 MESA DE DINERO", "📊 ANÁLISIS & SENTENCIA", "🧬 LABORATORIO QUANT"])
+
+# --- TAB 1: OPERATIVA ---
+with main_tabs[0]:
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("Cartera de Inversión")
+        if not df_pos.empty:
+            st.dataframe(df_pos.style.format({"Valor Mercado": "${:.2f}", "P&L ($)": "${:+.2f}"}).background_gradient(subset=['P&L (%)'], cmap='RdYlGn'), use_container_width=True)
+        else: st.info("Cartera vacía.")
+    with c2:
+        st.subheader("Orden de Mercado")
+        with st.form("order_form"):
+            t_op = st.selectbox("Activo", WATCHLIST)
+            tipo = st.selectbox("Operación", ["COMPRA", "VENTA"])
+            qty = st.number_input("Cantidad", 1, 10000)
+            precio_ejec = st.number_input("Precio Ejecución", 0.0)
+            if st.form_submit_button("CONFIRMAR ORDEN (SQL)"):
+                registrar_operacion_sql(t_op, tipo, qty, precio_ejec); st.rerun()
+
+# --- TAB 2: ANÁLISIS & SENTENCIA (NUEVO V51) ---
+with main_tabs[1]:
+    col_ana1, col_ana2 = st.columns([1, 2])
+    
+    with col_ana1:
+        sel_ticker = st.selectbox("Analizar Activo:", WATCHLIST)
+        st.write("---")
+        
+        # EL JUEZ (SCORING V51)
+        score, breakdown = calcular_score_quant(sel_ticker)
+        
+        st.markdown(f"### ⚖️ Veredicto: {score}/100")
+        fig_gauge = dibujar_velocimetro(score)
+        st.plotly_chart(fig_gauge, use_container_width=True)
+        
+        # Explicación del Veredicto
+        st.markdown("#### 📝 Desglose de la Sentencia:")
+        c_t, c_f, c_r = st.columns(3)
+        c_t.metric("Técnico", f"{breakdown['Técnico']}/40")
+        c_f.metric("Fundam.", f"{breakdown['Fundamental']}/40")
+        c_r.metric("Riesgo", f"{breakdown['Riesgo']}/20")
+        
+        if score >= 70: st.success("✅ CONCLUSIÓN: Oportunidad de COMPRA sólida.")
+        elif score <= 40: st.error("❌ CONCLUSIÓN: Activo peligroso o sobrevalorado. VENTA/ESPERAR.")
+        else: st.warning("⚠️ CONCLUSIÓN: Mantener/Observar. Faltan catalizadores.")
+
+    with col_ana2:
+        fig = graficar_master(sel_ticker)
+        if fig: st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("Ver Mapa de Calor"):
+            try:
+                df_map = generar_mapa_calor(WATCHLIST)
+                if df_map is not None:
+                    fig_heat = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
+                    st.plotly_chart(fig_heat, use_container_width=True)
+            except: st.warning("Datos no disponibles.")
+
+# --- TAB 3: LABORATORIO ---
+with main_tabs[2]:
+    st.subheader(f"🧬 Optimización: {sel_ticker}")
+    if st.button("🚀 INICIAR GRID SEARCH"):
+        with st.spinner("Simulando..."):
+            res_grid = optimizar_parametros_estrategia(sel_ticker)
+            if not res_grid.empty:
+                best = res_grid.loc[res_grid['Retorno %'].idxmax()]
+                st.success(f"Mejor RSI: Compra<{best['Compra <']} Venta>{best['Venta >']} (Retorno: {best['Retorno %']:.2f}%)")
+                try: 
+                    st.plotly_chart(px.density_heatmap(res_grid, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
+                except: st.dataframe(res_grid)
