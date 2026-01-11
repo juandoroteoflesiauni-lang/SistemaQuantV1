@@ -13,11 +13,10 @@ import os
 import toml
 import re
 
-# --- LIBRERÍAS DE MACHINE LEARNING ---
+# --- LIBRERÍAS ML ---
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings('ignore')
 
@@ -36,15 +35,12 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V30 (ML Prediction)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Sistema Quant V30.1 (Fixed)", layout="wide", page_icon="🧠")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
     .big-font {font-size:18px !important; font-weight: bold;}
-    .stTabs [data-baseweb="tab-list"] {gap: 5px;}
-    .stTabs [data-baseweb="tab"] {height: 40px; white-space: pre-wrap; background-color: #1e1e1e; border-radius: 5px; color: white;}
-    .stTabs [aria-selected="true"] {background-color: #00aa00; color: white !important;}
-    .pred-box {border: 2px solid #4CAF50; padding: 10px; border-radius: 10px; text-align: center;}
+    .pred-box {border: 2px solid #4CAF50; padding: 10px; border-radius: 10px; text-align: center; background-color: #1e1e1e;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,21 +53,6 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN']
 
 # --- MOTORES DE DATOS ---
-
-@st.cache_data(ttl=900)
-def obtener_macro():
-    try:
-        data = yf.download("SPY ^VIX", period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
-        spy = data['SPY']['Close']
-        vix = data['^VIX']['Close'].iloc[-1]
-        
-        ema200 = ta.ema(spy, 200).iloc[-1]
-        last_spy = spy.iloc[-1]
-        trend = "ALCISTA 🟢" if last_spy > ema200 else "BAJISTA 🔴"
-        
-        mood = "PÁNICO 😱" if vix > 30 else "MIEDO 😨" if vix > 20 else "CALMA 😎"
-        return trend, vix, mood
-    except: return "N/A", 0, "N/A"
 
 @st.cache_data(ttl=900)
 def obtener_radar(tickers):
@@ -114,10 +95,8 @@ def obtener_fundamental_inferido(ticker):
         pe = info.get('trailingPE') or info.get('forwardPE') or 0
         peg_oficial = info.get('pegRatio')
         growth_est = info.get('earningsGrowth') or info.get('revenueGrowth') or 0
-        pb = info.get('priceToBook') or 0
         target = info.get('targetMeanPrice') or 0
-        sector = info.get('sector') or 'N/A'
-
+        
         peg_final = 0
         peg_source = "N/A"
         if peg_oficial is not None:
@@ -127,7 +106,7 @@ def obtener_fundamental_inferido(ticker):
             peg_final = pe / (growth_est * 100)
             peg_source = "Estimado"
         
-        return {"PER": pe, "PEG": peg_final, "PEG_Source": peg_source, "Target": target, "Sector": sector}
+        return {"PER": pe, "PEG": peg_final, "PEG_Source": peg_source, "Target": target}
     except: return None
 
 def graficar_sniper(ticker):
@@ -173,152 +152,138 @@ def graficar_sniper(ticker):
         return fig
     except: return None
 
-# --- MOTOR DE PREDICCIÓN ML (NUEVO) ---
+# --- MOTOR ML CORREGIDO (V30.1) ---
 def predecir_precio_ia(ticker):
     try:
-        # 1. Descargar más historia para entrenar mejor (2 años)
+        # 1. Descarga Blindada
         df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+        
+        # Limpieza MultiIndex (IGUAL QUE EN EL GRÁFICO)
         if isinstance(df.columns, pd.MultiIndex):
-            if ticker in df.columns.levels[0]: df = df[ticker].copy()
-            else: df.columns = df.columns.get_level_values(-1)
+            try:
+                if ticker in df.columns.levels[0]: df = df[ticker].copy()
+                else: df.columns = df.columns.get_level_values(-1)
+            except: df.columns = df.columns.get_level_values(-1)
+        
+        # Renombrado de emergencia
+        if 'Close' not in df.columns:
+            if df.shape[1] >= 4:
+                # Asumimos Open, High, Low, Close...
+                cols = list(df.columns)
+                found = False
+                for c in cols:
+                    if "Close" in str(c): df.rename(columns={c: 'Close'}, inplace=True); found=True; break
+                if not found: df.columns = ["Open", "High", "Low", "Close", "Volume"][:df.shape[1]]
         
         if 'Close' not in df.columns: return None
 
-        # 2. Ingeniería de Características (Crear datos para la IA)
+        # 2. Ingeniería
         df['RSI'] = ta.rsi(df['Close'], 14)
         df['EMA20'] = ta.ema(df['Close'], 20)
         df['Return'] = df['Close'].pct_change()
         df['Volatilidad'] = df['Return'].rolling(5).std()
         
-        # Feature Lagging (La IA aprende del pasado para predecir futuro)
         df['Lag_Close_1'] = df['Close'].shift(1)
         df['Lag_RSI'] = df['RSI'].shift(1)
         
         df.dropna(inplace=True)
 
-        # 3. Definir Objetivo: El precio de Cierre (Close)
-        X = df[['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad']] # Variables
-        y = df['Close'] # Objetivo
+        # 3. ML
+        X = df[['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad']]
+        y = df['Close']
         
-        # 4. Dividir datos (80% entrenar, 20% probar)
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
         
-        # 5. Entrenar Modelo (Linear Regression es rápido y efectivo para tendencias)
         model_ml = LinearRegression()
         model_ml.fit(X_train, y_train)
         
-        # 6. Validar precisión
         preds = model_ml.predict(X_test)
-        score = r2_score(y_test, preds) * 100 # Precisión %
+        score = r2_score(y_test, preds) * 100
         
-        # 7. PREDECIR MAÑANA
-        # Usamos los datos de HOY para predecir MAÑANA
+        # 4. Predicción Futura
+        last_row = df.iloc[-1]
         last_data = pd.DataFrame([[
-            df['Close'].iloc[-1], 
-            df['RSI'].iloc[-1], 
-            df['EMA20'].iloc[-1], 
-            df['Volatilidad'].iloc[-1]
+            last_row['Close'], 
+            last_row['RSI'], 
+            last_row['EMA20'], 
+            last_row['Volatilidad']
         ]], columns=['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad'])
         
         future_price = model_ml.predict(last_data)[0]
         
-        return future_price, score, df['Close'].iloc[-1]
+        return future_price, score, last_row['Close']
 
     except Exception as e:
-        st.error(f"Error ML: {e}")
+        st.error(f"Error ML: {e}") # Debug visible
         return None
 
-# --- INTERFAZ PRINCIPAL ---
-
-st.title("🧠 Sistema Quant V30: AI Prediction Core")
-
-# BARRA SUPERIOR
-spy_trend, vix_val, market_mood = obtener_macro()
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("S&P 500", spy_trend)
-m2.metric("VIX", f"{vix_val:.2f}", market_mood)
-m3.metric("Capital", f"${st.session_state.get('capital', 2000)}") 
-m4.metric("IA Engine", "🟢 ONLINE")
-
-st.divider()
+# --- INTERFAZ ---
+st.title("🧠 Sistema Quant V30.1: AI Core")
 
 col_left, col_right = st.columns([1, 2.5])
 
 with col_left:
-    st.subheader("📡 Radar")
-    with st.expander("⚙️ Configuración"):
-        capital = st.number_input("Capital ($)", 2000, key='capital')
-        riesgo = st.slider("Riesgo %", 0.5, 3.0, 1.5)
-        if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
-
-    df_radar = obtener_radar(WATCHLIST)
+    st.subheader("Radar")
+    if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
     
+    df_radar = obtener_radar(WATCHLIST)
     if df_radar is not None and not df_radar.empty:
         df_radar = df_radar.sort_values("Score", ascending=False)
-        selected_ticker = st.selectbox("🔍 Seleccionar Activo:", df_radar['Ticker'].tolist())
+        selected_ticker = st.selectbox("Activo:", df_radar['Ticker'].tolist())
         st.dataframe(df_radar[['Ticker', 'Precio', 'Score', 'RSI']].style.format({"Precio": "${:.2f}", "RSI": "{:.0f}"}).background_gradient(subset=['Score'], cmap='RdYlGn'), use_container_width=True, height=400, hide_index=True)
         row = df_radar[df_radar['Ticker'] == selected_ticker].iloc[0]
     else: st.warning("Cargando..."); st.stop()
 
 with col_right:
-    st.subheader(f"Analizando: {selected_ticker} | Score: {row['Score']}/100")
+    st.subheader(f"Analizando: {selected_ticker}")
     
-    # NUEVA PESTAÑA: 🧠 Predicción IA
-    tabs = st.tabs(["🧠 Predicción IA (V30)", "📈 Gráfico Sniper", "🔬 Fundamental", "🛡️ Calculadora", "🚀 Señales"])
+    tabs = st.tabs(["🧠 Predicción IA", "📈 Gráfico", "🔬 Fundamental", "🛡️ Calc", "🚀 Señal"])
     
-    # TAB 1: PREDICCIÓN ML
     with tabs[0]:
-        st.write("🤖 **El Oráculo Matemático:** Entrenando modelo en tiempo real con datos históricos...")
+        st.info("🤖 **Modelo Predictivo:** Regresión Lineal entrenada en tiempo real (2 años de historia).")
         
-        if st.button("🔮 EJECUTAR MODELO PREDICTIVO"):
-            with st.spinner(f"Entrenando IA con datos de {selected_ticker}..."):
+        if st.button("🔮 EJECUTAR MODELO"):
+            with st.spinner(f"Entrenando IA para {selected_ticker}..."):
                 resultado = predecir_precio_ia(selected_ticker)
                 
                 if resultado:
                     pred_price, accuracy, current_price = resultado
                     cambio_pct = ((pred_price - current_price) / current_price) * 100
-                    color_pred = "green" if cambio_pct > 0 else "red"
+                    color_pred = "#00ff00" if cambio_pct > 0 else "#ff0000"
                     
                     st.markdown(f"""
                     <div class="pred-box">
-                        <h3>Precio Proyectado (Próximo Cierre)</h3>
+                        <h3>Proyección Próximo Cierre</h3>
                         <h1 style="color:{color_pred};">${pred_price:.2f}</h1>
                         <h4>Cambio esperado: {cambio_pct:+.2f}%</h4>
                     </div>
                     """, unsafe_allow_html=True)
                     
                     c1, c2 = st.columns(2)
-                    c1.metric("Precio Actual", f"${current_price:.2f}")
-                    c2.metric("Confianza del Modelo (R²)", f"{accuracy:.1f}%")
-                    
-                    if accuracy < 50:
-                        st.warning("⚠️ Precaución: La confianza del modelo es baja (<50%). El mercado está muy errático.")
-                    else:
-                        st.success("✅ Modelo con confianza aceptable.")
+                    c1.metric("Precio Base (Hoy)", f"${current_price:.2f}")
+                    c2.metric("Precisión del Modelo (R²)", f"{accuracy:.1f}%")
                 else:
-                    st.error("No se pudo generar la predicción.")
+                    st.error("Error generando predicción. Intenta otro activo.")
 
     with tabs[1]:
         fig = graficar_sniper(selected_ticker)
         if fig: st.plotly_chart(fig, use_container_width=True)
-
+    
     with tabs[2]:
-        if st.button("🔎 Analizar PEG"):
-            fund = obtener_fundamental_inferido(selected_ticker)
-            if fund:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("PER", f"{fund['PER']:.2f}x")
-                c2.metric("PEG Ratio", f"{fund['PEG']:.2f}", fund['PEG_Source'])
-                c3.metric("Target", f"${fund['Target']}")
+        fund = obtener_fundamental_inferido(selected_ticker)
+        if fund:
+            c1, c2 = st.columns(2)
+            c1.metric("PER", f"{fund['PER']:.2f}")
+            c2.metric("PEG", f"{fund['PEG']:.2f}", fund['PEG_Source'])
+            st.caption(f"Target: ${fund['Target']}")
 
     with tabs[3]:
-        stop_loss = row['Precio'] - (2 * row['ATR'])
-        shares = (capital * (riesgo/100)) / (row['Precio'] - stop_loss)
-        st.metric("Stop Loss", f"${stop_loss:.2f}")
+        stop = row['Precio'] - (2*row['ATR'])
+        shares = (2000 * 0.015) / (row['Precio'] - stop)
+        st.metric("Stop Loss", f"${stop:.2f}")
         st.metric("Comprar", f"{int(shares)} Acciones")
-
+    
     with tabs[4]:
-        if st.button("🚀 ENVIAR SEÑAL"):
-            msg = f"🚀 SEÑAL {selected_ticker} | Precio: ${row['Precio']:.2f}"
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-            st.success("Enviado!")
+        if st.button("🚀 Alertar Telegram"):
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": f"SEÑAL {selected_ticker}"})
+            st.success("Hecho")
