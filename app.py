@@ -1,4 +1,3 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
@@ -47,7 +46,7 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN PÁGINA ---
-st.set_page_config(page_title="Sistema Quant V40 (Heatmap)", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Sistema Quant V41 (Oracle)", layout="wide", page_icon="🔮")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
@@ -60,7 +59,6 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-# LISTA AMPLIADA CON INDICES Y SECTORES
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
@@ -118,26 +116,77 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR VISUAL V40 (HEATMAP) ---
+# --- MOTOR MONTECARLO (NUEVO V41) ---
+def simular_montecarlo(ticker, dias_proyeccion=30, simulaciones=500):
+    try:
+        # 1. Obtener datos históricos para calcular volatilidad real
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)['Close']
+        if df.empty: return None, None
+        
+        # Calcular retornos logarítmicos
+        log_returns = np.log(1 + df.pct_change())
+        u = log_returns.mean()
+        var = log_returns.var()
+        drift = u - (0.5 * var)
+        stdev = log_returns.std()
+        
+        # 2. Configurar Simulación
+        # Convertimos Series a valores simples para evitar conflictos de arrays
+        drift = drift.item() if isinstance(drift, pd.Series) else drift
+        stdev = stdev.item() if isinstance(stdev, pd.Series) else stdev
+        last_price = df.iloc[-1].item()
+        
+        daily_returns = np.exp(drift + stdev * norm.ppf(np.random.rand(dias_proyeccion, simulaciones)))
+        
+        # 3. Proyectar Precios
+        price_list = np.zeros_like(daily_returns)
+        price_list[0] = last_price
+        
+        for t in range(1, dias_proyeccion):
+            price_list[t] = price_list[t - 1] * daily_returns[t]
+            
+        # 4. Crear Gráfico "Espagueti"
+        fig = go.Figure()
+        # Solo dibujamos las primeras 50 líneas para no saturar el navegador
+        for i in range(min(50, simulaciones)):
+            fig.add_trace(go.Scatter(y=price_list[:, i], mode='lines', line=dict(width=1, color='rgba(0, 255, 255, 0.1)'), showlegend=False))
+            
+        # Línea Promedio (Esperanza Matemática)
+        mean_prices = np.mean(price_list, axis=1)
+        fig.add_trace(go.Scatter(y=mean_prices, mode='lines', line=dict(width=3, color='yellow'), name='Promedio Esperado'))
+        
+        # Intervalos de Confianza
+        p95 = np.percentile(price_list, 95, axis=1)
+        p05 = np.percentile(price_list, 5, axis=1)
+        
+        fig.add_trace(go.Scatter(y=p95, mode='lines', line=dict(width=1, color='green', dash='dash'), name='Escenario Optimista (95%)'))
+        fig.add_trace(go.Scatter(y=p05, mode='lines', line=dict(width=1, color='red', dash='dash'), name='Escenario Pesimista (5%)'))
+        
+        fig.update_layout(title=f"Simulación Montecarlo: {ticker} ({dias_proyeccion} días)", 
+                          template="plotly_dark", xaxis_title="Días Futuros", yaxis_title="Precio Proyectado")
+        
+        resultados = {
+            "ultimo_precio": last_price,
+            "esperado": mean_prices[-1],
+            "optimista": p95[-1],
+            "pesimista": p05[-1]
+        }
+        
+        return fig, resultados
+
+    except Exception as e: return None, str(e)
+
+# --- REQUERIMIENTOS EXTRA PARA MONTECARLO ---
+from scipy.stats import norm 
+
+# --- MOTORES EXISTENTES (Heatmap, Risk, etc) ---
 @st.cache_data(ttl=600)
 def generar_mapa_calor(tickers):
     try:
-        # Descargamos datos de hoy y ayer para ver variación %
         data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
         if data.empty: return None
-        
-        # Calculamos variación % del último día
         pct_change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
-        
-        # Preparamos DataFrame para Plotly
-        df_map = pd.DataFrame({
-            'Ticker': pct_change.index,
-            'Variacion': pct_change.values,
-            'Precio': data.iloc[-1].values
-        })
-        
-        # Añadimos columna de "Sector" simulada (o real si tuviéramos API premium)
-        # Aquí inferimos por listas conocidas para darle color
+        df_map = pd.DataFrame({'Ticker': pct_change.index, 'Variacion': pct_change.values, 'Precio': data.iloc[-1].values})
         sectores = []
         for t in df_map['Ticker']:
             if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sectores.append('Tecnología')
@@ -145,15 +194,10 @@ def generar_mapa_calor(tickers):
             elif t in ['SPY', 'QQQ', 'DIA']: sectores.append('Índices')
             elif t in ['GLD', 'USO']: sectores.append('Commodities')
             else: sectores.append('Otros')
-        df_map['Sector'] = sectores
-        
-        # Valor absoluto para el tamaño del cuadro (Volumen simulado por precio)
-        df_map['Size'] = df_map['Precio'] 
-        
+        df_map['Sector'] = sectores; df_map['Size'] = df_map['Precio'] 
         return df_map
-    except Exception as e: return None
+    except: return None
 
-# --- MOTORES EXISTENTES ---
 def calcular_riesgo_portafolio(df_pos):
     if df_pos.empty: return None, None, None
     tk = df_pos['Ticker'].tolist(); w = (df_pos['Valor Mercado']/df_pos['Valor Mercado'].sum()).values
@@ -261,53 +305,33 @@ def ejecutar_backtest_pro(ticker, capital, estrategia, params):
     except: return None
 
 # --- INTERFAZ ---
-st.title("🌍 Sistema Quant V40: Market Heatmap")
+st.title("🔮 Sistema Quant V41: The Oracle")
 
-# 1. MAPA DE CALOR (NUEVO V40)
-st.subheader("🔥 Visión Global del Mercado (24h)")
-df_mapa = generar_mapa_calor(WATCHLIST)
-
-if df_mapa is not None:
-    # Treemap interactivo
-    fig_map = px.treemap(
-        df_mapa, 
-        path=['Sector', 'Ticker'], 
-        values='Size',
-        color='Variacion',
-        color_continuous_scale='RdYlGn',
-        color_continuous_midpoint=0,
-        custom_data=['Variacion', 'Precio'],
-        title="Rendimiento del Mercado Hoy (Verde=Sube, Rojo=Baja)"
-    )
-    fig_map.update_traces(
-        texttemplate="%{label}<br>%{customdata[0]:.2f}%<br>$%{customdata[1]:.2f}",
-        textposition="middle center"
-    )
-    fig_map.update_layout(height=400, margin=dict(t=30, l=10, r=10, b=10))
-    st.plotly_chart(fig_map, use_container_width=True)
-else:
-    st.warning("Cargando datos del mapa...")
+# 1. MAPA DE CALOR
+with st.expander("🔥 Mapa de Calor del Mercado", expanded=False):
+    df_mapa = generar_mapa_calor(WATCHLIST)
+    if df_mapa is not None:
+        fig_map = px.treemap(df_mapa, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0, custom_data=['Variacion', 'Precio'], title="Mercado Hoy")
+        fig_map.update_traces(texttemplate="%{label}<br>%{customdata[0]:.2f}%", textposition="middle center")
+        fig_map.update_layout(height=350, margin=dict(t=30, l=10, r=10, b=10))
+        st.plotly_chart(fig_map, use_container_width=True)
 
 st.divider()
 
 # 2. GESTIÓN Y RIESGO
 col_p1, col_p2 = st.columns([2, 1])
 with col_p1:
-    st.subheader("🏦 Mi Portafolio (SQL)")
+    st.subheader("🏦 Mi Portafolio")
     df_pos = auditar_posiciones_sql()
     if not df_pos.empty:
         var95, vol_anual, corr_matrix = calcular_riesgo_portafolio(df_pos)
-        total_eq = df_pos['Valor Mercado'].sum()
-        total_pnl = df_pos['P&L ($)'].sum()
-        
+        total_eq = df_pos['Valor Mercado'].sum(); total_pnl = df_pos['P&L ($)'].sum()
         c1, c2, c3 = st.columns(3)
-        c1.metric("Patrimonio", f"${total_eq:,.2f}")
-        c2.metric("P&L Total", f"${total_pnl:+.2f}", delta_color="normal")
+        c1.metric("Patrimonio", f"${total_eq:,.2f}"); c2.metric("P&L Total", f"${total_pnl:+.2f}", delta_color="normal")
         if var95: c3.metric("VaR 95%", f"${var95:.2f}", delta_color="inverse")
-        
         def color_pnl(val): return f'color: {"#00ff00" if val > 0 else "#ff0000"}' if isinstance(val, (int, float)) else ''
         st.dataframe(df_pos.style.map(color_pnl, subset=['P&L ($)']).format({"Precio Prom.": "${:.2f}", "Precio Actual": "${:.2f}", "Valor Mercado": "${:.2f}", "P&L ($)": "${:+.2f}", "P&L (%)": "{:+.2f}%"}), use_container_width=True)
-    else: st.info("Cartera vacía. Registra operaciones.")
+    else: st.info("Cartera vacía.")
 
 with col_p2:
     with st.expander("📝 Operar", expanded=True):
@@ -318,30 +342,55 @@ with col_p2:
         except: p_ref = 0.0
         price = st.number_input("Precio", 0.0, 100000.0, p_ref)
         if st.button("Ejecutar (SQL)"):
-            registrar_operacion_sql(t_op, tipo, qty, price)
-            st.success("Guardado!"); st.rerun()
+            registrar_operacion_sql(t_op, tipo, qty, price); st.success("Guardado!"); st.rerun()
 
 st.divider()
 
-# 3. ANALISIS Y ESCANER
-st.markdown("### 🔭 Radar de Mercado")
+# 3. ANALISIS, ESCANER Y PESTAÑAS
+st.markdown("### 🔭 Laboratorio Financiero")
 df_s = escanear_oportunidades(WATCHLIST)
 if not df_s.empty:
     cols = st.columns(len(df_s))
     for idx, row in df_s.iterrows():
-        with st.container():
-             st.markdown(f"<div class='signal-box'><h3>{row['Ticker']}</h3><p>{row['Señal']}</p></div>", unsafe_allow_html=True)
+        with st.container(): st.markdown(f"<div class='signal-box'><h3>{row['Ticker']}</h3><p>{row['Señal']}</p></div>", unsafe_allow_html=True)
 
 c_l, c_r = st.columns([1, 2.5])
 with c_l:
     tk = st.selectbox("Analizar:", WATCHLIST)
     cap = st.number_input("Simulación ($)", 2000, 100000, 10000, key='cap_sim')
 with c_r:
-    tabs = st.tabs(["📈 Gráfico", "♟️ Backtest", "🧠 IA"])
+    tabs = st.tabs(["🔮 Monte Carlo", "📈 Gráfico", "♟️ Backtest", "🧠 IA"])
+    
+    # PESTAÑA NUEVA: MONTE CARLO
     with tabs[0]:
+        st.subheader(f"🔮 El Oráculo: {tk}")
+        st.write("Simulación de 1,000 futuros posibles basados en volatilidad histórica.")
+        
+        c_mc1, c_mc2 = st.columns([1, 3])
+        with c_mc1:
+            dias_mc = st.slider("Días a proyectar", 10, 90, 30)
+            if st.button("🎲 EJECUTAR SIMULACIÓN"):
+                with st.spinner("Simulando futuros paralelos..."):
+                    fig_mc, res_mc = simular_montecarlo(tk, dias_mc)
+                    if fig_mc:
+                        st.session_state['mc_fig'] = fig_mc
+                        st.session_state['mc_res'] = res_mc
+        
+        with c_mc2:
+            if 'mc_fig' in st.session_state:
+                res = st.session_state['mc_res']
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Precio Actual", f"${res['ultimo_precio']:.2f}")
+                k2.metric("Esperado (Promedio)", f"${res['esperado']:.2f}", f"{((res['esperado']-res['ultimo_precio'])/res['ultimo_precio'])*100:.1f}%")
+                k3.metric("Riesgo (5% Peor caso)", f"${res['pesimista']:.2f}", delta_color="inverse")
+                
+                st.plotly_chart(st.session_state['mc_fig'], use_container_width=True)
+                st.caption(f"El gráfico muestra 50 de 500 caminos simulados. El área entre líneas verde y roja contiene el 90% de probabilidad.")
+
+    with tabs[1]:
         fig = graficar_master(tk)
         if fig: st.plotly_chart(fig, use_container_width=True)
-    with tabs[1]:
+    with tabs[2]:
         strat = st.selectbox("Estrategia:", ["Bollinger (600% Mode)", "RSI"])
         if st.button("⏪ AUDITAR"):
             res = ejecutar_backtest_pro(tk, cap, strat, {})
