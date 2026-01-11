@@ -2,7 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots # Importante para gráficos dobles
 import requests 
 import google.generativeai as genai
 import feedparser
@@ -10,7 +11,7 @@ import warnings
 import numpy as np
 import os
 import toml
-import re # Para limpiar texto
+import re
 
 warnings.filterwarnings('ignore')
 
@@ -26,17 +27,14 @@ try:
         TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
         TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
         GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except Exception as e:
-    st.error(f"❌ Error de claves: {e}")
-    st.stop()
+except: st.stop() # Silencioso si falla para ir rápido
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V27 (Oracle)", layout="wide", page_icon="🔮")
+st.set_page_config(page_title="Sistema Quant V28 (Sniper)", layout="wide", page_icon="🎯")
 st.markdown("""
 <style>
-    .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; color: white;}
-    .sentiment-pos {color: #00ff00; font-weight: bold;}
-    .sentiment-neg {color: #ff0000; font-weight: bold;}
+    .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
+    .big-font {font-size:20px !important; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,8 +47,8 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN']
 
 # --- MOTORES DE DATOS ---
-@st.cache_data(ttl=1800)
-def obtener_datos_mercado(tickers):
+@st.cache_data(ttl=900)
+def obtener_datos_completos(tickers):
     try:
         df_prices = yf.download(" ".join(tickers), period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
     except: return None
@@ -67,147 +65,116 @@ def obtener_datos_mercado(tickers):
 
             if len(df) < 50: continue
             
-            # KPIs Técnicos
+            # Indicadores
             last_close = df['Close'].iloc[-1]
             rsi = ta.rsi(df['Close'], 14).iloc[-1]
             ema200 = ta.ema(df['Close'], 200).iloc[-1]
-            atr = ta.atr(df['High'], df['Low'], df['Close'], 14).iloc[-1]
             
-            trend = "ALCISTA" if last_close > ema200 else "BAJISTA"
-            
-            # Score Simple
+            # Score
             score = 50
+            trend = "ALCISTA" if last_close > ema200 else "BAJISTA"
             if trend == "ALCISTA": score += 20
             if rsi < 30: score += 30
             elif rsi > 70: score -= 20
             
-            resumen.append({
-                "Ticker": t, "Precio": last_close, "RSI": rsi,
-                "Tendencia": trend, "ATR": atr, "Score": score
-            })
+            resumen.append({"Ticker": t, "Precio": last_close, "RSI": rsi, "Tendencia": trend, "Score": score})
         except: pass
     return pd.DataFrame(resumen)
 
-# --- MOTOR DE NOTICIAS (NUEVO) ---
-@st.cache_data(ttl=3600)
-def analizar_noticias_ia(ticker):
-    # 1. Buscar en Google News RSS
-    try:
-        # Buscamos en inglés para tener más volumen de datos
-        rss_url = f"https://news.google.com/rss/search?q={ticker}+stock+news&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(rss_url)
-        
-        headlines = []
-        for entry in feed.entries[:5]: # Analizamos las 5 más recientes
-            headlines.append(f"- {entry.title}")
-        
-        texto_noticias = "\n".join(headlines)
-        
-        if not headlines:
-            return {"score": 50, "summary": "Sin noticias recientes.", "headlines": []}
+# --- MOTOR GRÁFICO (NUEVO) ---
+def graficar_avanzado(ticker):
+    df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+    if df.empty: return None
+    
+    # Calcular Indicadores
+    df['EMA20'] = ta.ema(df['Close'], 20)
+    df['EMA50'] = ta.ema(df['Close'], 50)
+    df['RSI'] = ta.rsi(df['Close'], 14)
+    bb = ta.bbands(df['Close'], length=20, std=2)
+    df = pd.concat([df, bb], axis=1) # Unir bandas al df
+    
+    # Señales Visuales (Triángulos)
+    # Compra: RSI < 35
+    buy_signals = df[df['RSI'] < 35]
+    # Venta: RSI > 75
+    sell_signals = df[df['RSI'] > 75]
 
-        # 2. Preguntar a Gemini
-        prompt = f"""
-        Actúa como analista financiero experto. Analiza estos titulares recientes sobre {ticker}:
-        {texto_noticias}
-        
-        Tarea:
-        1. Asigna un puntaje de Sentimiento de 0 (Muy Negativo) a 100 (Muy Positivo). 50 es Neutral.
-        2. Resume la razón principal en una frase corta (en español).
-        
-        Responde SOLO con este formato exacto:
-        SCORE: [Numero]
-        RESUMEN: [Texto]
-        """
-        response = model.generate_content(prompt).text
-        
-        # 3. Extraer datos (Parsing básico)
-        score_match = re.search(r"SCORE: (\d+)", response)
-        score = int(score_match.group(1)) if score_match else 50
-        
-        summary_match = re.search(r"RESUMEN: (.*)", response)
-        summary = summary_match.group(1) if summary_match else "Análisis IA completado."
-        
-        return {"score": score, "summary": summary, "headlines": headlines}
-        
-    except Exception as e:
-        return {"score": 50, "summary": "Error analizando noticias.", "headlines": []}
+    # Crear Subplots (Arriba Precio, Abajo RSI)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
 
-# --- TELEGRAM ---
-def enviar_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-    except: pass
+    # 1. Velas Japonesas
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+    
+    # 2. Medias Móviles y Bandas
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
+
+    # 3. Marcadores de Señal
+    fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="SEÑAL COMPRA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="ALERTA VENTA"), row=1, col=1)
+
+    # 4. RSI (Abajo)
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
+    # Líneas de sobrecompra/venta
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+    fig.update_layout(title=f"🔬 Análisis Técnico Profundo: {ticker}", template="plotly_dark", height=700, xaxis_rangeslider_visible=False)
+    return fig
 
 # --- INTERFAZ ---
-st.title("🔮 Sistema Quant V27: El Oráculo")
+st.title("🎯 Sistema Quant V28: The Sniper Scope")
 
-df_radar = obtener_datos_mercado(WATCHLIST)
+# Layout de 2 Columnas: Izquierda (Radar), Derecha (Gráfico)
+col_radar, col_chart = st.columns([1, 3])
 
-# Sidebar
-with st.sidebar:
-    st.header("🎛️ Panel de Control")
-    capital = st.number_input("Capital ($)", 2000)
-    riesgo = st.slider("Riesgo %", 0.5, 3.0, 1.5)
-    st.divider()
-    if st.button("🔄 Refrescar Todo"):
-        st.cache_data.clear()
-        st.rerun()
-
-# Tabs
-tab1, tab2, tab3 = st.tabs(["📡 Radar Técnico", "📰 Noticias & Sentimiento", "🤖 Agente Telegram"])
-
-with tab1:
-    if df_radar is not None:
-        st.subheader("Escáner de Mercado")
-        df_show = df_radar.sort_values("Score", ascending=False)
-        st.dataframe(df_show.style.format({"Precio": "${:.2f}", "RSI": "{:.1f}"}), use_container_width=True)
-    else: st.error("Error cargando datos.")
-
-with tab2:
-    st.subheader("🧠 Análisis de Sentimiento (IA + Noticias)")
-    st.info("La IA lee las noticias de Google News en tiempo real y detecta el 'humor' del mercado.")
+with col_radar:
+    st.subheader("📡 Radar")
+    if st.button("🔄 Escanear"): st.cache_data.clear()
+    
+    df_radar = obtener_datos_completos(WATCHLIST)
     
     if df_radar is not None:
-        sel_news = st.selectbox("Seleccionar Activo:", df_radar['Ticker'].tolist())
+        # Selector de activo (Funciona como control remoto del gráfico)
+        df_radar = df_radar.sort_values("Score", ascending=False)
+        selected_ticker = st.radio("Selecciona Activo:", df_radar['Ticker'].tolist())
         
-        if st.button(f"🔮 Leer Futuro de {sel_news}"):
-            with st.spinner(f"Leyendo noticias sobre {sel_news}..."):
-                news_data = analizar_noticias_ia(sel_news)
-                
-                # Visualización del Score (Medidor)
-                sc = news_data['score']
-                color = "green" if sc > 60 else "red" if sc < 40 else "yellow"
-                
-                c1, c2 = st.columns([1, 3])
-                c1.metric("Sentimiento IA", f"{sc}/100", f"{'Positivo' if sc>60 else 'Negativo' if sc<40 else 'Neutral'}")
-                c2.success(f"💡 **Conclusión:** {news_data['summary']}")
-                
-                with st.expander("Ver Titulares Analizados"):
-                    for h in news_data['headlines']:
-                        st.write(h)
+        # Muestra datos rápidos del seleccionado
+        row = df_radar[df_radar['Ticker'] == selected_ticker].iloc[0]
+        st.divider()
+        st.metric("Score", f"{row['Score']}/100")
+        st.metric("RSI", f"{row['RSI']:.1f}")
+        st.caption(f"Tendencia: {row['Tendencia']}")
+        
+        # Botón de Telegram Rápido
+        if st.button(f"📢 Alertar {selected_ticker}"):
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                          json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 OJO con {selected_ticker}. RSI: {row['RSI']:.1f}"})
+            st.success("Enviado")
 
-with tab3:
-    st.subheader("🚀 Envío de Señales")
-    if st.button("Enviar Mejor Oportunidad a Telegram"):
-        if df_radar is not None:
-            best = df_radar.sort_values("Score", ascending=False).iloc[0]
-            
-            # Hacemos análisis de noticias al vuelo para el reporte
-            with st.spinner("Analizando noticias de última hora..."):
-                news_analysis = analizar_noticias_ia(best['Ticker'])
-            
-            msg = f"""
-🌟 *OPORTUNIDAD V27 DETECTADA* 🌟
-
-🎯 *Activo:* {best['Ticker']}
-💰 *Precio:* ${best['Precio']:.2f}
-📊 *RSI:* {best['RSI']:.1f}
-
-🗞️ *Sentimiento Noticias:* {news_analysis['score']}/100
-💡 *Razón:* {news_analysis['summary']}
-
-_Enviado desde tu Sistema Quant_
-            """
-            enviar_telegram(msg)
-            st.success("Mensaje Enviado!")
+with col_chart:
+    if df_radar is not None:
+        st.subheader(f"📊 Gráfico Interactivo: {selected_ticker}")
+        
+        # Pestañas dentro del gráfico para cambiar de vista
+        t_chart, t_news = st.tabs(["📈 Gráfico Técnico", "📰 Noticias IA"])
+        
+        with t_chart:
+            with st.spinner("Trazando indicadores..."):
+                fig = graficar_avanzado(selected_ticker)
+                if fig: st.plotly_chart(fig, use_container_width=True)
+        
+        with t_news:
+            if st.button("Analizar Noticias (Live)"):
+                # Código V27 simplificado
+                try:
+                    rss = f"https://news.google.com/rss/search?q={selected_ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+                    feed = feedparser.parse(rss)
+                    txt = "\n".join([e.title for e in feed.entries[:5]])
+                    res = model.generate_content(f"Analiza sentimiento (0-100) de: {txt}").text
+                    st.info(res)
+                except: st.error("Error noticias")
+    else:
+        st.info("👈 Dale al botón 'Escanear' en la izquierda para empezar.")
