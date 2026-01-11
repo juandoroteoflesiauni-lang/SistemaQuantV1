@@ -7,18 +7,27 @@ import plotly.express as px
 from plotly.subplots import make_subplots 
 import requests 
 import google.generativeai as genai
-import feedparser
 import warnings
 import numpy as np
 import os
 import toml
-import re
-
-# --- LIBRERÍAS MATEMÁTICAS ---
+import sqlite3
+from datetime import datetime
+from scipy.signal import argrelextrema 
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
-from scipy.optimize import minimize # <--- Usamos esto en lugar de PyPortfolioOpt
+from scipy.optimize import minimize 
+
+# --- CONFIGURACIÓN MOTOR HÍBRIDO ---
+try:
+    from pypfopt import EfficientFrontier, risk_models, expected_returns
+    from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
+    HAVE_PYPFOPT = True
+    ENGINE_STATUS = "🚀 PyPortfolioOpt (Pro)"
+except ImportError:
+    HAVE_PYPFOPT = False
+    ENGINE_STATUS = "🛠️ Scipy Native (Backup)"
 
 warnings.filterwarnings('ignore')
 
@@ -36,13 +45,12 @@ try:
         GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except: st.stop()
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V31.1 (Native)", layout="wide", page_icon="🏛️")
+# --- CONFIGURACIÓN PÁGINA ---
+st.set_page_config(page_title="Sistema Quant V40 (Heatmap)", layout="wide", page_icon="🌍")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
-    .pred-box {border: 2px solid #4CAF50; padding: 10px; border-radius: 10px; text-align: center; background-color: #1e1e1e;}
-    .opt-box {border: 2px solid #00BCD4; padding: 10px; border-radius: 10px; background-color: #1e1e1e;}
+    .signal-box {border: 2px solid #FFD700; padding: 10px; border-radius: 5px; background-color: #2b2b00; text-align: center;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,279 +59,293 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-# --- ACTIVOS ---
-WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN']
+# LISTA AMPLIADA CON INDICES Y SECTORES
+WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
+DB_NAME = "quant_database.db"
 
-# --- MOTORES DE DATOS ---
+# --- MOTOR SQL ---
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL)''')
+    conn.commit()
+    conn.close()
 
-@st.cache_data(ttl=900)
-def obtener_radar(tickers):
+def registrar_operacion_sql(ticker, tipo, cantidad, precio):
+    conn = sqlite3.connect(DB_NAME); c = conn.cursor()
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S"); total = cantidad * precio
+    c.execute("INSERT INTO trades (fecha, ticker, tipo, cantidad, precio, total) VALUES (?, ?, ?, ?, ?, ?)", (fecha, ticker, tipo, cantidad, precio, total))
+    conn.commit(); conn.close()
+    return True
+
+def obtener_historial_sql():
+    conn = sqlite3.connect(DB_NAME)
+    try: df = pd.read_sql_query("SELECT * FROM trades ORDER BY fecha DESC", conn)
+    except: df = pd.DataFrame()
+    conn.close(); return df
+
+def auditar_posiciones_sql():
+    conn = sqlite3.connect(DB_NAME)
+    try: df = pd.read_sql_query("SELECT * FROM trades", conn)
+    except: return pd.DataFrame()
+    conn.close()
+    if df.empty: return pd.DataFrame()
+    pos = {}
+    for idx, row in df.iterrows():
+        t = row['ticker']
+        if t not in pos: pos[t] = {"Cantidad": 0, "Costo_Total": 0}
+        if row['tipo'] == "COMPRA": pos[t]["Cantidad"] += row['cantidad']; pos[t]["Costo_Total"] += row['total']
+        elif row['tipo'] == "VENTA":
+            pos[t]["Cantidad"] -= row['cantidad']
+            if pos[t]["Cantidad"] > 0: unit = pos[t]["Costo_Total"]/(pos[t]["Cantidad"]+row['cantidad']); pos[t]["Costo_Total"] -= (unit*row['cantidad'])
+            else: pos[t]["Costo_Total"] = 0
+    
+    res = []; act = [t for t, d in pos.items() if d['Cantidad'] > 0]
+    if not act: return pd.DataFrame()
+    try: curr = yf.download(" ".join(act), period="1d", progress=False, auto_adjust=True)['Close']
+    except: return pd.DataFrame()
+
+    for t, d in pos.items():
+        if d['Cantidad'] > 0:
+            try:
+                if len(act) == 1: price = float(curr.iloc[-1])
+                else: price = float(curr.iloc[-1][t])
+                val = d['Cantidad']*price; pnl = val - d['Costo_Total']
+                res.append({"Ticker": t, "Cantidad": d['Cantidad'], "Valor Mercado": val, "P&L ($)": pnl, "P&L (%)": (pnl/d['Costo_Total'])*100})
+            except: pass
+    return pd.DataFrame(res)
+
+init_db()
+
+# --- MOTOR VISUAL V40 (HEATMAP) ---
+@st.cache_data(ttl=600)
+def generar_mapa_calor(tickers):
     try:
-        df_prices = yf.download(" ".join(tickers), period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True)
-    except: return None
+        # Descargamos datos de hoy y ayer para ver variación %
+        data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
+        if data.empty: return None
+        
+        # Calculamos variación % del último día
+        pct_change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        
+        # Preparamos DataFrame para Plotly
+        df_map = pd.DataFrame({
+            'Ticker': pct_change.index,
+            'Variacion': pct_change.values,
+            'Precio': data.iloc[-1].values
+        })
+        
+        # Añadimos columna de "Sector" simulada (o real si tuviéramos API premium)
+        # Aquí inferimos por listas conocidas para darle color
+        sectores = []
+        for t in df_map['Ticker']:
+            if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sectores.append('Tecnología')
+            elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sectores.append('Cripto')
+            elif t in ['SPY', 'QQQ', 'DIA']: sectores.append('Índices')
+            elif t in ['GLD', 'USO']: sectores.append('Commodities')
+            else: sectores.append('Otros')
+        df_map['Sector'] = sectores
+        
+        # Valor absoluto para el tamaño del cuadro (Volumen simulado por precio)
+        df_map['Size'] = df_map['Precio'] 
+        
+        return df_map
+    except Exception as e: return None
 
-    resumen = []
-    if df_prices is None or df_prices.empty: return None
+# --- MOTORES EXISTENTES ---
+def calcular_riesgo_portafolio(df_pos):
+    if df_pos.empty: return None, None, None
+    tk = df_pos['Ticker'].tolist(); w = (df_pos['Valor Mercado']/df_pos['Valor Mercado'].sum()).values
+    try:
+        d = yf.download(" ".join(tk), period="1y", progress=False, auto_adjust=True)['Close']
+        if len(tk)==1: d = d.to_frame(name=tk[0])
+        ret = np.log(d/d.shift(1)).dropna(); cov = ret.cov()*252; vol = np.sqrt(np.dot(w.T, np.dot(cov, w)))
+        var = df_pos['Valor Mercado'].sum() * (vol/np.sqrt(252)) * 1.65
+        return var, vol, ret.corr()
+    except: return None, None, None
 
+@st.cache_data(ttl=300)
+def escanear_oportunidades(tickers):
+    señales = []
+    try: data = yf.download(" ".join(tickers), period="3mo", interval="1d", group_by='ticker', progress=False, auto_adjust=True)
+    except: return pd.DataFrame()
     for t in tickers:
         try:
             if len(tickers) > 1:
-                if t in df_prices.columns.levels[0]: df = df_prices[t].copy().dropna()
-                else: continue
-            else: df = df_prices.copy().dropna()
-
-            if len(df) < 50: continue
-            
-            last_close = df['Close'].iloc[-1]
-            rsi = ta.rsi(df['Close'], 14).iloc[-1]
-            ema200 = ta.ema(df['Close'], 200).iloc[-1]
-            atr = ta.atr(df['High'], df['Low'], df['Close'], 14).iloc[-1]
-            
-            score = 50
-            trend = "ALCISTA" if last_close > ema200 else "BAJISTA"
-            if trend == "ALCISTA": score += 20
-            if rsi < 30: score += 30
-            elif rsi > 70: score -= 20
-            
-            resumen.append({"Ticker": t, "Precio": last_close, "RSI": rsi, "Tendencia": trend, "ATR": atr, "Score": score})
+                try: df = data[t].copy()
+                except: continue
+            else: df = data.copy()
+            df = df.dropna()
+            if len(df) < 20: continue
+            if 'Close' not in df.columns and df.shape[1] >= 4: df.columns = ['Open', 'High', 'Low', 'Close', 'Volume'][:df.shape[1]]
+            last_close = df['Close'].iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
+            bb = ta.bbands(df['Close'], length=20, std=2); lower = bb.iloc[-1, 0]; upper = bb.iloc[-1, 2]
+            tipo = "NEUTRAL"; fuerza = 0
+            if last_close < lower: tipo = "COMPRA BOL 🟢"; fuerza = 90
+            elif last_close > upper: tipo = "VENTA BOL 🔴"; fuerza = 80
+            elif rsi < 30: tipo = "COMPRA RSI 🟢"; fuerza += 70
+            elif rsi > 70: tipo = "VENTA RSI 🔴"; fuerza += 70
+            if tipo != "NEUTRAL": señales.append({"Ticker": t, "Señal": tipo, "Fuerza": fuerza})
         except: pass
-    return pd.DataFrame(resumen)
+    return pd.DataFrame(señales)
 
-@st.cache_data(ttl=3600)
-def obtener_fundamental_inferido(ticker):
+def graficar_master(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        pe = info.get('trailingPE') or info.get('forwardPE') or 0
-        peg_oficial = info.get('pegRatio')
-        growth_est = info.get('earningsGrowth') or info.get('revenueGrowth') or 0
-        target = info.get('targetMeanPrice') or 0
-        
-        peg_final = 0
-        peg_source = "N/A"
-        if peg_oficial is not None:
-            peg_final = peg_oficial
-            peg_source = "Yahoo"
-        elif pe > 0 and growth_est > 0:
-            peg_final = pe / (growth_est * 100)
-            peg_source = "Estimado"
-        
-        return {"PER": pe, "PEG": peg_final, "PEG_Source": peg_source, "Target": target}
-    except: return None
-
-def graficar_sniper(ticker):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+        stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True)
         if df.empty: return None
-        if isinstance(df.columns, pd.MultiIndex):
-            try:
-                if ticker in df.columns.levels[0]: df = df[ticker].copy()
-                else: df.columns = df.columns.get_level_values(-1)
-            except: df.columns = df.columns.get_level_values(-1)
-        if 'Close' not in df.columns: 
-             if df.shape[1] >= 4:
-                cols = list(df.columns)
-                for c in cols:
-                    if "Close" in str(c): df.rename(columns={c: 'Close'}, inplace=True); break
-
-        df['EMA20'] = ta.ema(df['Close'], 20)
-        df['RSI'] = ta.rsi(df['Close'], 14)
-        bb = ta.bbands(df['Close'], length=20, std=2)
-        if bb is not None: df = pd.concat([df, bb], axis=1)
-        
-        buy_sig = df[df['RSI'] < 35]
-        sell_sig = df[df['RSI'] > 75]
-
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
+        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
+        highs = df['High'].values; lows = df['Low'].values
+        max_idx = argrelextrema(highs, np.greater, order=10)[0]; min_idx = argrelextrema(lows, np.less, order=10)[0]
+        res = sorted([r for r in highs[max_idx] if 0 < (r - df['Close'].iloc[-1])/df['Close'].iloc[-1] < 0.15])[:2]
+        sop = sorted([s for s in lows[min_idx] if 0 < (df['Close'].iloc[-1] - s)/df['Close'].iloc[-1] < 0.15])[-2:]
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price"), row=1, col=1)
         if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
-        try:
-            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='gray', width=1, dash='dot'), name="Banda Sup"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='gray', width=1, dash='dot'), fill='tonexty', name="Banda Inf"), row=1, col=1)
+        try: fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1); fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
         except: pass
-        
-        fig.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="COMPRA"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="VENTA"), row=1, col=1)
+        for s in sop: fig.add_hline(y=s, line_dash="dot", line_color="green", row=1, col=1)
+        for r in res: fig.add_hline(y=r, line_dash="dot", line_color="red", row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=2), name="RSI"), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=5, b=5))
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1); fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
         return fig
     except: return None
 
 def predecir_precio_ia(ticker):
     try:
-        df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            try:
-                if ticker in df.columns.levels[0]: df = df[ticker].copy()
-                else: df.columns = df.columns.get_level_values(-1)
-            except: df.columns = df.columns.get_level_values(-1)
-        
-        if 'Close' not in df.columns:
-            if df.shape[1] >= 4:
-                cols = list(df.columns)
-                for c in cols:
-                    if "Close" in str(c): df.rename(columns={c: 'Close'}, inplace=True); break
-        if 'Close' not in df.columns: return None
-
-        df['RSI'] = ta.rsi(df['Close'], 14)
-        df['EMA20'] = ta.ema(df['Close'], 20)
-        df['Return'] = df['Close'].pct_change()
-        df['Volatilidad'] = df['Return'].rolling(5).std()
-        df['Lag_Close_1'] = df['Close'].shift(1)
-        df['Lag_RSI'] = df['RSI'].shift(1)
+        stock = yf.Ticker(ticker); df = stock.history(period="2y", interval="1d", auto_adjust=True)
+        if df.empty: return None
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df['RSI'] = ta.rsi(df['Close'], 14); df['EMA20'] = ta.ema(df['Close'], 20)
+        df['Return'] = df['Close'].pct_change(); df['Volatilidad'] = df['Return'].rolling(5).std()
+        df['Lag_Close_1'] = df['Close'].shift(1); df['Lag_RSI'] = df['RSI'].shift(1)
         df.dropna(inplace=True)
-
-        X = df[['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad']]
-        y = df['Close']
+        if len(df) < 20: return None
+        X = df[['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad']]; y = df['Close']
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        model_ml = LinearRegression()
-        model_ml.fit(X_train, y_train)
-        preds = model_ml.predict(X_test)
-        score = r2_score(y_test, preds) * 100
-        
+        model_ml = LinearRegression(); model_ml.fit(X_train, y_train)
+        preds = model_ml.predict(X_test); score = r2_score(y_test, preds) * 100
         last_row = df.iloc[-1]
         last_data = pd.DataFrame([[last_row['Close'], last_row['RSI'], last_row['EMA20'], last_row['Volatilidad']]], columns=['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad'])
-        future_price = model_ml.predict(last_data)[0]
-        return future_price, score, last_row['Close']
+        return model_ml.predict(last_data)[0], score, last_row['Close']
     except: return None
 
-# --- MOTOR DE OPTIMIZACIÓN NATIVO (SCIPY) V31.1 ---
-def optimizar_portafolio_nativo(tickers_list, capital_invertir):
+def ejecutar_backtest_pro(ticker, capital, estrategia, params):
     try:
-        # 1. Descargar Precios Históricos (Blindado)
-        df = yf.download(tickers_list, period="2y", progress=False, auto_adjust=True)['Close']
-        if df.empty: return None, "Sin datos."
-        
-        # 2. Retornos Logarítmicos
-        log_ret = np.log(df/df.shift(1))
-        
-        # 3. Funciones Matemáticas (Sharpe Negativo para minimizar)
-        def get_ret_vol_sr(weights):
-            weights = np.array(weights)
-            ret = np.sum(log_ret.mean() * weights) * 252
-            vol = np.sqrt(np.dot(weights.T, np.dot(log_ret.cov() * 252, weights)))
-            sr = ret/vol
-            return np.array([ret, vol, sr])
-        
-        def neg_sharpe(weights):
-            return -get_ret_vol_sr(weights)[2]
-
-        # 4. Optimización (Minimizar el Sharpe Negativo)
-        cons = ({'type':'eq','fun': lambda x: np.sum(x) - 1}) # Restricción: Suma de pesos = 1
-        bounds = tuple((0, 1) for _ in range(len(tickers_list))) # Límites: 0% a 100% por activo
-        init_guess = [1/len(tickers_list)] * len(tickers_list) # Inicio: Todos iguales
-        
-        opt_results = minimize(neg_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
-        
-        # 5. Resultados
-        best_weights = opt_results.x
-        ret, vol, sr = get_ret_vol_sr(best_weights)
-        
-        # Formatear Salida
-        weights_dict = {ticker: weight for ticker, weight in zip(tickers_list, best_weights)}
-        
-        # Asignación de Capital
-        latest_prices = df.iloc[-1]
-        allocation = {}
-        leftover = capital_invertir
-        
-        for t, w in weights_dict.items():
-            if w > 0.01: # Solo mostrar si es > 1%
-                money = capital_invertir * w
-                qty = int(money / latest_prices[t])
-                cost = qty * latest_prices[t]
-                allocation[t] = qty
-                leftover -= cost
-        
-        return {
-            "weights": weights_dict,
-            "allocation": allocation,
-            "metrics": [ret, vol, sr],
-            "leftover": leftover
-        }, "OK"
-
-    except Exception as e:
-        return None, f"Error Matemático: {str(e)}"
+        stock = yf.Ticker(ticker); df = stock.history(period="3y", interval="1d", auto_adjust=True)
+        if df.empty: return None
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        cash = capital; position = 0; trade_log = []; equity_curve = []; peak = capital; dd = 0
+        if estrategia == "Bollinger (600% Mode)":
+            bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
+            buy_cond = lambda i: df['Close'].iloc[i] < df.iloc[i, -3]; sell_cond = lambda i: df['Close'].iloc[i] > df.iloc[i, -1]; start = 25
+        elif estrategia == "RSI":
+            df['RSI'] = ta.rsi(df['Close'], 14); buy_cond = lambda i: df['RSI'].iloc[i] < 30; sell_cond = lambda i: df['RSI'].iloc[i] > 70; start = 20
+        for i in range(start, len(df)):
+            price = df['Close'].iloc[i]; date = df.index[i]
+            if cash > 0 and buy_cond(i):
+                qty = int(cash/price)
+                if qty > 0: cash -= qty*price; position += qty; trade_log.append({"Fecha": date, "Tipo": "COMPRA", "Precio": price, "Saldo": cash})
+            elif position > 0 and sell_cond(i):
+                cash += position*price; trade_log.append({"Fecha": date, "Tipo": "VENTA", "Precio": price, "Saldo": cash}); position = 0
+            val = cash + (position*price); equity_curve.append({"Fecha": date, "Equity": val})
+            if val > peak: peak = val
+            current_dd = (peak - val) / peak; 
+            if current_dd > dd: dd = current_dd
+        final = cash + (position * df['Close'].iloc[-1]); ret = ((final - capital)/capital)*100
+        bh = ((df['Close'].iloc[-1] - df['Close'].iloc[start]) / df['Close'].iloc[start])*100
+        return {"retorno": ret, "buy_hold": bh, "trades": len(trade_log), "max_drawdown": dd*100, "log": pd.DataFrame(trade_log), "equity_curve": pd.DataFrame(equity_curve).set_index("Fecha")}
+    except: return None
 
 # --- INTERFAZ ---
-st.title("🏛️ Sistema Quant V31.1: Native Architect")
+st.title("🌍 Sistema Quant V40: Market Heatmap")
 
-col_left, col_right = st.columns([1, 2.5])
+# 1. MAPA DE CALOR (NUEVO V40)
+st.subheader("🔥 Visión Global del Mercado (24h)")
+df_mapa = generar_mapa_calor(WATCHLIST)
 
-with col_left:
-    st.subheader("Radar")
-    with st.expander("⚙️ Fondos"):
-        capital = st.number_input("Capital Total ($)", 2000, 100000, 10000, step=500, key='capital')
+if df_mapa is not None:
+    # Treemap interactivo
+    fig_map = px.treemap(
+        df_mapa, 
+        path=['Sector', 'Ticker'], 
+        values='Size',
+        color='Variacion',
+        color_continuous_scale='RdYlGn',
+        color_continuous_midpoint=0,
+        custom_data=['Variacion', 'Precio'],
+        title="Rendimiento del Mercado Hoy (Verde=Sube, Rojo=Baja)"
+    )
+    fig_map.update_traces(
+        texttemplate="%{label}<br>%{customdata[0]:.2f}%<br>$%{customdata[1]:.2f}",
+        textposition="middle center"
+    )
+    fig_map.update_layout(height=400, margin=dict(t=30, l=10, r=10, b=10))
+    st.plotly_chart(fig_map, use_container_width=True)
+else:
+    st.warning("Cargando datos del mapa...")
 
-    if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
-    
-    df_radar = obtener_radar(WATCHLIST)
-    if df_radar is not None and not df_radar.empty:
-        df_radar = df_radar.sort_values("Score", ascending=False)
-        selected_ticker = st.selectbox("Activo:", df_radar['Ticker'].tolist())
-        st.dataframe(df_radar[['Ticker', 'Score', 'RSI']].style.background_gradient(subset=['Score'], cmap='RdYlGn'), use_container_width=True, height=300)
-    else: st.stop()
+st.divider()
 
-with col_right:
-    tabs = st.tabs(["⚖️ Optimizador", "🧠 IA Predictiva", "📈 Gráfico", "🔬 Fundamental", "🚀 Señal"])
-    
-    # TAB 1: OPTIMIZADOR NATIVO
-    with tabs[0]:
-        st.subheader("⚖️ Portafolio Óptimo (Motor Scipy Nativo)")
-        st.write("Cálculo matemático directo (Sin dependencias externas) para maximizar Ratio Sharpe.")
+# 2. GESTIÓN Y RIESGO
+col_p1, col_p2 = st.columns([2, 1])
+with col_p1:
+    st.subheader("🏦 Mi Portafolio (SQL)")
+    df_pos = auditar_posiciones_sql()
+    if not df_pos.empty:
+        var95, vol_anual, corr_matrix = calcular_riesgo_portafolio(df_pos)
+        total_eq = df_pos['Valor Mercado'].sum()
+        total_pnl = df_pos['P&L ($)'].sum()
         
-        col_opt1, col_opt2 = st.columns([1, 2])
-        with col_opt1:
-            assets_to_opt = st.multiselect("Activos a incluir:", WATCHLIST, default=WATCHLIST[:5])
-            if st.button("🧮 CALCULAR ASIGNACIÓN"):
-                with st.spinner("Optimizando Matemáticas..."):
-                    res_opt, msg_opt = optimizar_portafolio_nativo(assets_to_opt, capital)
-                    
-                    if res_opt:
-                        st.session_state['opt_result'] = res_opt
-                    else:
-                        st.error(f"Error: {msg_opt}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Patrimonio", f"${total_eq:,.2f}")
+        c2.metric("P&L Total", f"${total_pnl:+.2f}", delta_color="normal")
+        if var95: c3.metric("VaR 95%", f"${var95:.2f}", delta_color="inverse")
+        
+        def color_pnl(val): return f'color: {"#00ff00" if val > 0 else "#ff0000"}' if isinstance(val, (int, float)) else ''
+        st.dataframe(df_pos.style.map(color_pnl, subset=['P&L ($)']).format({"Precio Prom.": "${:.2f}", "Precio Actual": "${:.2f}", "Valor Mercado": "${:.2f}", "P&L ($)": "${:+.2f}", "P&L (%)": "{:+.2f}%"}), use_container_width=True)
+    else: st.info("Cartera vacía. Registra operaciones.")
 
-        with col_opt2:
-            if 'opt_result' in st.session_state:
-                res = st.session_state['opt_result']
-                metrics = res['metrics']
-                
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Retorno Anual", f"{metrics[0]*100:.1f}%")
-                c2.metric("Riesgo (Vol)", f"{metrics[1]*100:.1f}%")
-                c3.metric("Sharpe Ratio", f"{metrics[2]:.2f}")
-                
-                clean_w = {k: v for k, v in res['weights'].items() if v > 0.01}
-                fig_pie = px.pie(values=list(clean_w.values()), names=list(clean_w.keys()), title="Distribución Óptima de Capital")
-                st.plotly_chart(fig_pie, use_container_width=True)
-                
-                st.markdown("### 🛒 Orden de Compra Sugerida")
-                if res['allocation']:
-                    alloc_df = pd.DataFrame.from_dict(res['allocation'], orient='index', columns=['Acciones'])
-                    st.dataframe(alloc_df)
-                else: st.warning("Capital insuficiente para comprar 1 acción entera.")
-                st.info(f"💰 Cash sobrante: ${res['leftover']:.2f}")
+with col_p2:
+    with st.expander("📝 Operar", expanded=True):
+        t_op = st.selectbox("Activo", WATCHLIST)
+        tipo = st.selectbox("Orden", ["COMPRA", "VENTA"])
+        qty = st.number_input("Títulos", 1, 10000, 10)
+        try: p_ref = float(yf.Ticker(t_op).history(period='1d')['Close'].iloc[-1])
+        except: p_ref = 0.0
+        price = st.number_input("Precio", 0.0, 100000.0, p_ref)
+        if st.button("Ejecutar (SQL)"):
+            registrar_operacion_sql(t_op, tipo, qty, price)
+            st.success("Guardado!"); st.rerun()
 
-    with tabs[1]:
-        if st.button("🔮 PREDICCIÓN IA"):
-            res_ia = predecir_precio_ia(selected_ticker)
-            if res_ia:
-                pred, acc, curr = res_ia
-                pct = ((pred - curr)/curr)*100
-                st.markdown(f"<div class='pred-box'><h1>${pred:.2f}</h1><p>{pct:+.2f}% vs Hoy</p></div>", unsafe_allow_html=True)
-                st.metric("Confianza R²", f"{acc:.1f}%")
+st.divider()
 
-    with tabs[2]:
-        fig = graficar_sniper(selected_ticker)
+# 3. ANALISIS Y ESCANER
+st.markdown("### 🔭 Radar de Mercado")
+df_s = escanear_oportunidades(WATCHLIST)
+if not df_s.empty:
+    cols = st.columns(len(df_s))
+    for idx, row in df_s.iterrows():
+        with st.container():
+             st.markdown(f"<div class='signal-box'><h3>{row['Ticker']}</h3><p>{row['Señal']}</p></div>", unsafe_allow_html=True)
+
+c_l, c_r = st.columns([1, 2.5])
+with c_l:
+    tk = st.selectbox("Analizar:", WATCHLIST)
+    cap = st.number_input("Simulación ($)", 2000, 100000, 10000, key='cap_sim')
+with c_r:
+    tabs = st.tabs(["📈 Gráfico", "♟️ Backtest", "🧠 IA"])
+    with tabs[0]:
+        fig = graficar_master(tk)
         if fig: st.plotly_chart(fig, use_container_width=True)
-    
-    with tabs[3]:
-        fund = obtener_fundamental_inferido(selected_ticker)
-        if fund: st.json(fund)
-
-    with tabs[4]:
-        if st.button("🚀 Alertar"):
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": f"SEÑAL {selected_ticker}"})
+    with tabs[1]:
+        strat = st.selectbox("Estrategia:", ["Bollinger (600% Mode)", "RSI"])
+        if st.button("⏪ AUDITAR"):
+            res = ejecutar_backtest_pro(tk, cap, strat, {})
+            if res:
+                c1, c2 = st.columns(2)
+                c1.metric("Retorno", f"{res['retorno']:.1f}%")
+                c2.metric("B&H", f"{res['buy_hold']:.1f}%")
+                st.line_chart(res['equity_curve'])
