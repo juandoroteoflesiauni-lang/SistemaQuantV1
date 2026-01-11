@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = "6288094504"
 GOOGLE_API_KEY = "AIzaSyB356Wjicaf9VRUYTX6_EL728IQF6nOmuQ" 
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V25.1 (Fixed)", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Sistema Quant V25.2 (Robust)", layout="wide", page_icon="🛡️")
 st.markdown("""
 <style>
     .metric-card {background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; color: white;}
@@ -34,7 +34,7 @@ except: pass
 # --- ACTIVOS ---
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'JPM']
 
-st.title("🏛️ Sistema Quant V25.1: Institutional Suite")
+st.title("🛡️ Sistema Quant V25.2: Motor de Inferencia")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -42,7 +42,7 @@ with st.sidebar:
     capital_total = st.number_input("Capital ($)", value=2000)
     riesgo_pct = st.slider("Riesgo (%)", 0.5, 3.0, 2.0)
     st.divider()
-    if st.button("🔄 Refrescar Datos"):
+    if st.button("🔄 Forzar Recarga"):
         st.cache_data.clear()
         st.rerun()
 
@@ -75,8 +75,6 @@ def obtener_datos_completos(tickers):
             
             trend_d = "ALCISTA" if last_close > ema200 else "BAJISTA"
             mom_1w = "ALCISTA" if df['Close'].iloc[-1] > df['Close'].iloc[-5] else "BAJISTA"
-            
-            # Volatilidad Anualizada
             volatilidad = df['Close'].pct_change().std() * np.sqrt(252) * 100
             
             score = 50
@@ -97,32 +95,42 @@ def obtener_datos_completos(tickers):
     return pd.DataFrame(resumen), df_prices
 
 @st.cache_data(ttl=3600)
-def obtener_fundamental_profundo(ticker):
+def obtener_fundamental_inferido(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # 1. Intentar obtener PEG directo
-        peg = info.get('pegRatio', None)
-        
-        # 2. Obtener datos auxiliares
-        pe = info.get('trailingPE', info.get('forwardPE', 0))
-        pb = info.get('priceToBook', 0)
-        beta = info.get('beta', 0)
-        target = info.get('targetMeanPrice', 0)
-        sector = info.get('sector', 'N/A')
-        
-        # 3. Lógica de Respaldo (Fallback) para PEG
-        # Si PEG es None o 0, intentamos calcularlo o marcarlo
-        peg_display = peg if peg is not None else 0
+        # 1. Recuperación de Datos Crudos (Con protección contra None)
+        pe = info.get('trailingPE') or info.get('forwardPE') or 0
+        peg_oficial = info.get('pegRatio')
+        growth_est = info.get('earningsGrowth') or info.get('revenueGrowth') or 0
+        pb = info.get('priceToBook') or 0
+        beta = info.get('beta') or 1
+        target = info.get('targetMeanPrice') or 0
+        sector = info.get('sector') or 'N/A'
+
+        # 2. Motor de Inferencia (Si falta PEG, lo calculamos)
+        peg_final = 0
+        peg_source = "N/A"
+
+        if peg_oficial is not None:
+            peg_final = peg_oficial
+            peg_source = "Yahoo Oficial"
+        elif pe > 0 and growth_est > 0:
+            # Fórmula: PEG = PER / (Crecimiento * 100)
+            peg_final = pe / (growth_est * 100)
+            peg_source = "Calculado (Inferencia)"
         
         return {
             "PER": pe,
-            "PEG": peg_display,
+            "PEG": peg_final,
+            "PEG_Source": peg_source,
+            "Growth": growth_est,
             "P/B": pb,
             "Beta": beta,
             "Target Price": target,
-            "Sector": sector
+            "Sector": sector,
+            "Raw Info": info # Guardamos todo por si acaso
         }
     except Exception as e:
         return None
@@ -151,49 +159,46 @@ with tabs[0]:
             )
             
         with col_detail:
-            st.subheader("🔬 Rayos X Fundamental")
+            st.subheader("🔬 Rayos X Fundamental (V2)")
             sel_fund = st.selectbox("Analizar Activo:", df_radar['Ticker'].tolist())
             
             if st.button(f"🔍 Escanear {sel_fund}"):
-                with st.spinner("Conectando con bases de datos financieras..."):
-                    fund_data = obtener_fundamental_profundo(sel_fund)
+                with st.spinner("Iniciando motor de inferencia..."):
+                    fund_data = obtener_fundamental_inferido(sel_fund)
                     
                     if fund_data:
                         st.info(f"Sector: **{fund_data['Sector']}**")
                         
-                        # Métricas con lógica de color
+                        # Métricas
                         c1, c2 = st.columns(2)
+                        c1.metric("PER", f"{fund_data['PER']:.2f}x")
                         
-                        # PER
-                        per_val = fund_data['PER']
-                        c1.metric("PER (Valuación)", f"{per_val:.2f}x", "Caro" if per_val > 25 else "Barato", delta_color="inverse")
-                        
-                        # PEG (El dato problemático)
+                        # PEG con indicación de origen
                         peg_val = fund_data['PEG']
-                        peg_str = f"{peg_val:.2f}" if peg_val > 0 else "N/A"
-                        c2.metric("PEG (Crecimiento)", peg_str, "Infravalorado (<1)" if 0 < peg_val < 1 else "Normal")
+                        delta_color = "normal" if 0 < peg_val < 1.5 else "inverse"
+                        c2.metric("PEG Ratio", f"{peg_val:.2f}", fund_data['PEG_Source'], delta_color=delta_color)
                         
                         # Target
                         c3, c4 = st.columns(2)
                         target = fund_data['Target Price']
                         try:
                             actual = df_radar[df_radar['Ticker']==sel_fund]['Precio'].values[0]
-                            upside = ((target - actual) / actual) * 100
-                            c3.metric("Precio Objetivo", f"${target}", f"{upside:.1f}% Potencial")
-                        except:
-                            c3.metric("Precio Objetivo", "N/A")
+                            upside = ((target - actual) / actual) * 100 if target > 0 else 0
+                            c3.metric("Target Analistas", f"${target}", f"{upside:.1f}% Upside")
+                        except: c3.metric("Target", "N/A")
                             
-                        c4.metric("Beta (Riesgo)", f"{fund_data['Beta']:.2f}")
+                        c4.metric("Beta", f"{fund_data['Beta']:.2f}")
 
-                        if peg_val == 0:
-                            st.warning("⚠️ Nota: PEG = 0 o N/A indica que Yahoo Finance no tiene la previsión de crecimiento de ganancias para este activo hoy.")
+                        # Debugger Expandible (Para ver qué pasa)
+                        with st.expander("🛠️ Ver Datos Crudos (Debug)"):
+                            st.write("Si el PEG sigue siendo 0, es porque Yahoo no tiene ni PER ni Crecimiento Estimado para esta acción hoy.")
+                            st.json(fund_data)
                     else:
                         st.error("Error obteniendo fundamentales.")
 
 with tabs[1]:
-    st.subheader("🕸️ Matriz de Riesgo (Correlación)")
+    st.subheader("🕸️ Matriz de Riesgo")
     if df_raw_prices is not None:
-        # Limpieza de datos para correlación
         close_df = pd.DataFrame()
         for t in WATCHLIST:
             try:
@@ -207,7 +212,6 @@ with tabs[1]:
             corr = close_df.corr()
             fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("🔴 Rojo (+1.0) = Se mueven idénticos (No diversifica). 🔵 Azul (-1.0) = Se mueven opuestos.")
 
 with tabs[2]:
     st.subheader("🛡️ Calculadora")
@@ -219,4 +223,5 @@ with tabs[2]:
         st.metric("Comprar", f"{int(shares)} Acciones", f"Stop Loss: ${stop:.2f}")
 
 with tabs[3]:
-    st.info("Laboratorio disponible (código backend optimizado).")
+    st.info("Laboratorio disponible.")
+
