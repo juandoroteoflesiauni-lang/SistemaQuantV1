@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots 
 import requests 
 import google.generativeai as genai
@@ -13,10 +14,17 @@ import os
 import toml
 import re
 
-# --- LIBRERÍAS ML ---
+# --- LIBRERÍAS MATEMÁTICAS ---
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
+# Intentamos importar PyPortfolioOpt, si no está, usamos modo fallback
+try:
+    from pypfopt import EfficientFrontier, risk_models, expected_returns
+    from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
+    HAVE_PYPFOPT = True
+except ImportError:
+    HAVE_PYPFOPT = False
 
 warnings.filterwarnings('ignore')
 
@@ -35,12 +43,12 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Sistema Quant V30.1 (Fixed)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Sistema Quant V31 (Architect)", layout="wide", page_icon="🏛️")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
-    .big-font {font-size:18px !important; font-weight: bold;}
     .pred-box {border: 2px solid #4CAF50; padding: 10px; border-radius: 10px; text-align: center; background-color: #1e1e1e;}
+    .opt-box {border: 2px solid #00BCD4; padding: 10px; border-radius: 10px; background-color: #1e1e1e;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -113,14 +121,11 @@ def graficar_sniper(ticker):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
         if df.empty: return None
-        
-        # Limpieza MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 if ticker in df.columns.levels[0]: df = df[ticker].copy()
                 else: df.columns = df.columns.get_level_values(-1)
             except: df.columns = df.columns.get_level_values(-1)
-        
         if 'Close' not in df.columns: 
              if df.shape[1] >= 4:
                 cols = list(df.columns)
@@ -152,138 +157,170 @@ def graficar_sniper(ticker):
         return fig
     except: return None
 
-# --- MOTOR ML CORREGIDO (V30.1) ---
 def predecir_precio_ia(ticker):
     try:
-        # 1. Descarga Blindada
         df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
-        
-        # Limpieza MultiIndex (IGUAL QUE EN EL GRÁFICO)
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 if ticker in df.columns.levels[0]: df = df[ticker].copy()
                 else: df.columns = df.columns.get_level_values(-1)
             except: df.columns = df.columns.get_level_values(-1)
         
-        # Renombrado de emergencia
         if 'Close' not in df.columns:
             if df.shape[1] >= 4:
-                # Asumimos Open, High, Low, Close...
                 cols = list(df.columns)
-                found = False
                 for c in cols:
-                    if "Close" in str(c): df.rename(columns={c: 'Close'}, inplace=True); found=True; break
-                if not found: df.columns = ["Open", "High", "Low", "Close", "Volume"][:df.shape[1]]
-        
+                    if "Close" in str(c): df.rename(columns={c: 'Close'}, inplace=True); break
         if 'Close' not in df.columns: return None
 
-        # 2. Ingeniería
         df['RSI'] = ta.rsi(df['Close'], 14)
         df['EMA20'] = ta.ema(df['Close'], 20)
         df['Return'] = df['Close'].pct_change()
         df['Volatilidad'] = df['Return'].rolling(5).std()
-        
         df['Lag_Close_1'] = df['Close'].shift(1)
         df['Lag_RSI'] = df['RSI'].shift(1)
-        
         df.dropna(inplace=True)
 
-        # 3. ML
         X = df[['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad']]
         y = df['Close']
-        
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        
         model_ml = LinearRegression()
         model_ml.fit(X_train, y_train)
-        
         preds = model_ml.predict(X_test)
         score = r2_score(y_test, preds) * 100
         
-        # 4. Predicción Futura
         last_row = df.iloc[-1]
-        last_data = pd.DataFrame([[
-            last_row['Close'], 
-            last_row['RSI'], 
-            last_row['EMA20'], 
-            last_row['Volatilidad']
-        ]], columns=['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad'])
-        
+        last_data = pd.DataFrame([[last_row['Close'], last_row['RSI'], last_row['EMA20'], last_row['Volatilidad']]], columns=['Lag_Close_1', 'Lag_RSI', 'EMA20', 'Volatilidad'])
         future_price = model_ml.predict(last_data)[0]
-        
         return future_price, score, last_row['Close']
+    except: return None
 
+# --- MOTOR DE OPTIMIZACIÓN V31 ---
+def optimizar_portafolio(tickers_list, capital_invertir):
+    if not HAVE_PYPFOPT:
+        return None, "Librería PyPortfolioOpt no instalada."
+    
+    try:
+        # Descarga Masiva Blindada
+        df = yf.download(tickers_list, period="2y", progress=False, auto_adjust=True)['Close']
+        if df.empty: return None, "No hay datos."
+        
+        # Matemáticas Financieras
+        mu = expected_returns.mean_historical_return(df) # Retorno Esperado
+        S = risk_models.sample_cov(df) # Matriz de Covarianza (Riesgo)
+        
+        # Frontera Eficiente (Sharpe Ratio)
+        ef = EfficientFrontier(mu, S)
+        weights = ef.max_sharpe() # Maximizar Retorno/Riesgo
+        cleaned_weights = ef.clean_weights()
+        
+        # Resultados de Performance
+        perf = ef.portfolio_performance(verbose=False)
+        retorno_esp = perf[0]
+        volatilidad_esp = perf[1]
+        sharpe = perf[2]
+        
+        # Asignación Discreta (Cuántas acciones comprar)
+        latest_prices = get_latest_prices(df)
+        da = DiscreteAllocation(cleaned_weights, latest_prices, total_portfolio_value=capital_invertir)
+        allocation, leftover = da.greedy_portfolio()
+        
+        return {
+            "weights": cleaned_weights,
+            "allocation": allocation,
+            "metrics": [retorno_esp, volatilidad_esp, sharpe],
+            "leftover": leftover
+        }, "OK"
+        
     except Exception as e:
-        st.error(f"Error ML: {e}") # Debug visible
-        return None
+        return None, str(e)
 
 # --- INTERFAZ ---
-st.title("🧠 Sistema Quant V30.1: AI Core")
+st.title("🏛️ Sistema Quant V31: The Architect")
 
 col_left, col_right = st.columns([1, 2.5])
 
 with col_left:
     st.subheader("Radar")
+    # Configuración Global
+    with st.expander("⚙️ Fondos"):
+        capital = st.number_input("Capital Total ($)", 2000, 100000, 10000, step=500, key='capital')
+        st.caption("Usado para cálculos de portafolio.")
+
     if st.button("🔄 Refrescar"): st.cache_data.clear(); st.rerun()
     
     df_radar = obtener_radar(WATCHLIST)
     if df_radar is not None and not df_radar.empty:
         df_radar = df_radar.sort_values("Score", ascending=False)
         selected_ticker = st.selectbox("Activo:", df_radar['Ticker'].tolist())
-        st.dataframe(df_radar[['Ticker', 'Precio', 'Score', 'RSI']].style.format({"Precio": "${:.2f}", "RSI": "{:.0f}"}).background_gradient(subset=['Score'], cmap='RdYlGn'), use_container_width=True, height=400, hide_index=True)
-        row = df_radar[df_radar['Ticker'] == selected_ticker].iloc[0]
-    else: st.warning("Cargando..."); st.stop()
+        st.dataframe(df_radar[['Ticker', 'Score', 'RSI']].style.background_gradient(subset=['Score'], cmap='RdYlGn'), use_container_width=True, height=300)
+    else: st.stop()
 
 with col_right:
-    st.subheader(f"Analizando: {selected_ticker}")
+    # SISTEMA DE PESTAÑAS
+    tabs = st.tabs(["⚖️ Optimizador", "🧠 IA Predictiva", "📈 Gráfico", "🔬 Fundamental", "🚀 Señal"])
     
-    tabs = st.tabs(["🧠 Predicción IA", "📈 Gráfico", "🔬 Fundamental", "🛡️ Calc", "🚀 Señal"])
-    
+    # TAB 1: OPTIMIZADOR DE PORTAFOLIO (V31)
     with tabs[0]:
-        st.info("🤖 **Modelo Predictivo:** Regresión Lineal entrenada en tiempo real (2 años de historia).")
+        st.subheader("⚖️ Teoría Moderna de Portafolios (Markowitz)")
+        st.write("Calcula la combinación matemática perfecta para maximizar ganancias y minimizar riesgo.")
         
-        if st.button("🔮 EJECUTAR MODELO"):
-            with st.spinner(f"Entrenando IA para {selected_ticker}..."):
-                resultado = predecir_precio_ia(selected_ticker)
-                
-                if resultado:
-                    pred_price, accuracy, current_price = resultado
-                    cambio_pct = ((pred_price - current_price) / current_price) * 100
-                    color_pred = "#00ff00" if cambio_pct > 0 else "#ff0000"
+        if not HAVE_PYPFOPT:
+            st.error("⚠️ Falta la librería `PyPortfolioOpt`. Instálala o este módulo no funcionará.")
+            st.code("pip install PyPortfolioOpt")
+        
+        col_opt1, col_opt2 = st.columns([1, 2])
+        with col_opt1:
+            assets_to_opt = st.multiselect("Activos a incluir:", WATCHLIST, default=WATCHLIST[:5])
+            if st.button("🧮 CALCULAR PORTAFOLIO ÓPTIMO"):
+                with st.spinner("Optimizando Frontera Eficiente..."):
+                    res_opt, msg_opt = optimizar_portafolio(assets_to_opt, capital)
                     
-                    st.markdown(f"""
-                    <div class="pred-box">
-                        <h3>Proyección Próximo Cierre</h3>
-                        <h1 style="color:{color_pred};">${pred_price:.2f}</h1>
-                        <h4>Cambio esperado: {cambio_pct:+.2f}%</h4>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    c1, c2 = st.columns(2)
-                    c1.metric("Precio Base (Hoy)", f"${current_price:.2f}")
-                    c2.metric("Precisión del Modelo (R²)", f"{accuracy:.1f}%")
-                else:
-                    st.error("Error generando predicción. Intenta otro activo.")
+                    if res_opt:
+                        st.session_state['opt_result'] = res_opt
+                    else:
+                        st.error(f"Error: {msg_opt}")
 
+        with col_opt2:
+            if 'opt_result' in st.session_state:
+                res = st.session_state['opt_result']
+                metrics = res['metrics']
+                
+                # Métricas del Portafolio
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Retorno Anual Est.", f"{metrics[0]*100:.1f}%")
+                c2.metric("Volatilidad (Riesgo)", f"{metrics[1]*100:.1f}%")
+                c3.metric("Sharpe Ratio", f"{metrics[2]:.2f}")
+                
+                # Gráfico de Torta (Asignación)
+                clean_w = {k: v for k, v in res['weights'].items() if v > 0.01}
+                fig_pie = px.pie(values=list(clean_w.values()), names=list(clean_w.keys()), title="Asignación de Capital Ideal")
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Lista de Compras
+                st.markdown("### 🛒 Lista de Compras (Orden Ejecutiva)")
+                alloc_df = pd.DataFrame.from_dict(res['allocation'], orient='index', columns=['Cantidad'])
+                st.dataframe(alloc_df)
+                st.info(f"💰 Cash sobrante: ${res['leftover']:.2f}")
+
+    # TAB 2: IA PREDICTIVA (V30.1)
     with tabs[1]:
+        if st.button("🔮 PREDICCIÓN INDIVIDUAL"):
+            res_ia = predecir_precio_ia(selected_ticker)
+            if res_ia:
+                pred, acc, curr = res_ia
+                pct = ((pred - curr)/curr)*100
+                st.markdown(f"<div class='pred-box'><h1>${pred:.2f}</h1><p>{pct:+.2f}% vs Hoy</p></div>", unsafe_allow_html=True)
+                st.metric("Confianza R²", f"{acc:.1f}%")
+
+    with tabs[2]:
         fig = graficar_sniper(selected_ticker)
         if fig: st.plotly_chart(fig, use_container_width=True)
     
-    with tabs[2]:
-        fund = obtener_fundamental_inferido(selected_ticker)
-        if fund:
-            c1, c2 = st.columns(2)
-            c1.metric("PER", f"{fund['PER']:.2f}")
-            c2.metric("PEG", f"{fund['PEG']:.2f}", fund['PEG_Source'])
-            st.caption(f"Target: ${fund['Target']}")
-
     with tabs[3]:
-        stop = row['Precio'] - (2*row['ATR'])
-        shares = (2000 * 0.015) / (row['Precio'] - stop)
-        st.metric("Stop Loss", f"${stop:.2f}")
-        st.metric("Comprar", f"{int(shares)} Acciones")
-    
+        fund = obtener_fundamental_inferido(selected_ticker)
+        if fund: st.json(fund)
+
     with tabs[4]:
-        if st.button("🚀 Alertar Telegram"):
+        if st.button("🚀 Alertar"):
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": f"SEÑAL {selected_ticker}"})
-            st.success("Hecho")
