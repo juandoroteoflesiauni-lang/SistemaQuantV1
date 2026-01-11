@@ -1,3 +1,4 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
@@ -11,6 +12,7 @@ import os
 import toml
 import sqlite3
 import math
+import feedparser # <--- LIBRERÍA NUEVA PARA NOTICIAS
 from datetime import datetime
 from scipy.signal import argrelextrema 
 from sklearn.model_selection import train_test_split
@@ -18,6 +20,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from scipy.optimize import minimize 
 from scipy.stats import norm 
+import google.generativeai as genai
 
 # --- CONFIGURACIÓN MOTOR HÍBRIDO ---
 try:
@@ -46,16 +49,20 @@ try:
 except: st.stop()
 
 # --- CONFIGURACIÓN PÁGINA ---
-st.set_page_config(page_title="Sistema Quant V43 (Accountant)", layout="wide", page_icon="💎")
+st.set_page_config(page_title="Sistema Quant V44 (News Reader)", layout="wide", page_icon="📰")
 st.markdown("""
 <style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 10px; color: white;}
     .signal-box {border: 2px solid #FFD700; padding: 10px; border-radius: 5px; background-color: #2b2b00; text-align: center;}
     .macro-card {background-color: #1e2130; padding: 10px; border-radius: 5px; text-align: center; border: 1px solid #444;}
-    .undervalued {color: #00ff00; font-weight: bold;}
-    .overvalued {color: #ff0000; font-weight: bold;}
+    .news-card {background-color: #1a1c24; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #4CAF50;}
 </style>
 """, unsafe_allow_html=True)
+
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+except: pass
 
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
 MACRO_TICKERS = {'S&P 500': 'SPY', 'VIX (Miedo)': '^VIX', 'Bonos 10Y': '^TNX', 'Oro': 'GC=F', 'Dólar': 'DX-Y.NYB'}
@@ -107,55 +114,75 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR CONTABLE & VALUACIÓN (NUEVO V43) ---
+# --- MOTOR DE NOTICIAS & SENTIMIENTO IA (NUEVO V44) ---
+@st.cache_data(ttl=3600) # Cache de 1 hora para no gastar API
+def analizar_noticias_ia(ticker):
+    try:
+        # 1. Obtener Noticias de Google News (RSS)
+        rss_url = f"https://news.google.com/rss/search?q={ticker}+stock+finance&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(rss_url)
+        
+        if not feed.entries: return None
+        
+        # Tomamos los 5 titulares más recientes
+        headlines = [entry.title for entry in feed.entries[:5]]
+        links = [entry.link for entry in feed.entries[:5]]
+        
+        # 2. Análisis con Gemini IA
+        prompt = f"""
+        Actúa como un analista financiero senior. Analiza estos titulares sobre {ticker}:
+        {headlines}
+        
+        1. Resume el sentimiento general en un párrafo corto en español.
+        2. Dame una puntuación de sentimiento del -100 (Muy Bajista/Miedo) al +100 (Muy Alcista/Euforia).
+        3. Clasifica el sentimiento en una palabra: 'ALCISTA', 'BAJISTA' o 'NEUTRAL'.
+        
+        Formato de respuesta:
+        SENTIMIENTO: [Puntuación]
+        CLASIFICACION: [Clasificación]
+        RESUMEN: [Resumen]
+        """
+        
+        response = model.generate_content(prompt)
+        text = response.text
+        
+        # Parsing básico de la respuesta (Buscamos las palabras clave)
+        score = 0
+        clasificacion = "NEUTRAL"
+        resumen = text
+        
+        # Extracción simple de datos
+        for line in text.split('\n'):
+            if "SENTIMIENTO:" in line:
+                try: score = int(line.split(":")[1].strip())
+                except: pass
+            if "CLASIFICACION:" in line:
+                clasificacion = line.split(":")[1].strip()
+            if "RESUMEN:" in line:
+                resumen = line.split("RESUMEN:")[1].strip()
+
+        return {
+            "headlines": headlines,
+            "links": links,
+            "score": score,
+            "class": clasificacion,
+            "summary": text # Mostramos el texto completo de la IA por si el parsing falla
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- MOTORES EXISTENTES (Macro, Valuación, etc) ---
 @st.cache_data(ttl=3600)
 def calcular_valor_intrinseco(ticker):
-    """Calcula el Valor Intrínseco usando Graham y Peter Lynch"""
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        # Datos Clave
-        precio_actual = info.get('currentPrice') or info.get('regularMarketPreviousClose')
-        eps = info.get('trailingEps') # Ganancia por acción
-        book_value = info.get('bookValue') # Valor libros por acción
-        pe_ratio = info.get('trailingPE') 
-        growth_rate = info.get('earningsGrowth', 0) * 100 # Crecimiento estimado %
-        
-        # 1. FÓRMULA DE BENJAMIN GRAHAM
-        # V = Raíz(22.5 * EPS * ValorLibro)
-        graham_number = 0
-        if eps and book_value and eps > 0 and book_value > 0:
-            graham_number = math.sqrt(22.5 * eps * book_value)
-            
-        # 2. VALOR JUSTO PETER LYNCH
-        # Valor Justo = EPS * (Crecimiento Esperado + Dividend Yield) 
-        # Simplificado: Si el P/E es igual a la tasa de crecimiento, es precio justo (PEG = 1)
-        lynch_value = 0
-        if eps and growth_rate and growth_rate > 0:
-            # Lynch solía decir que una empresa que crece al 20% debería tener un P/E de 20
-            lynch_value = eps * growth_rate 
+        stock = yf.Ticker(ticker); info = stock.info
+        price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+        eps = info.get('trailingEps'); book = info.get('bookValue')
+        graham = math.sqrt(22.5 * eps * book) if eps and book and eps>0 and book>0 else 0
+        status = "INFRAVALORADA 🟢" if graham > price else "SOBREVALORADA 🔴"
+        return {"Precio": price, "Graham": graham, "Status_Graham": status, "Diff": ((graham-price)/price)*100}
+    except: return None
 
-        # Diagnóstico
-        status_graham = "N/A"
-        if graham_number > 0:
-            diff_graham = ((graham_number - precio_actual) / precio_actual) * 100
-            status_graham = "INFRAVALORADA 🟢" if graham_number > precio_actual else "SOBREVALORADA 🔴"
-        
-        return {
-            "Precio": precio_actual,
-            "Graham": graham_number,
-            "Lynch": lynch_value,
-            "Status_Graham": status_graham,
-            "Diff_Graham": diff_graham if graham_number > 0 else 0,
-            "PER": pe_ratio,
-            "Growth": growth_rate,
-            "EPS": eps,
-            "BookValue": book_value
-        }
-    except Exception as e: return None
-
-# --- MOTORES EXISTENTES ---
 def obtener_datos_macro():
     tickers = list(MACRO_TICKERS.values())
     try:
@@ -216,9 +243,7 @@ def generar_mapa_calor(tickers):
         return df
     except: return None
 
-# --- GRAFICO Y BACKTEST ORIGINALES ---
 def graficar_master(ticker):
-    # (Código V36 completo mantenido, resumido aquí para visualización)
     try:
         stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True)
         if df.empty: return None
@@ -270,7 +295,7 @@ def ejecutar_backtest_pro(ticker, capital, estrategia, params):
     except: return None
 
 # --- INTERFAZ ---
-st.title("💎 Sistema Quant V43: The Accountant")
+st.title("📰 Sistema Quant V44: News Reader")
 
 # 1. CINTA MACRO
 macro_data = obtener_datos_macro()
@@ -305,64 +330,72 @@ with c_left:
             registrar_operacion_sql(op_tk, op_type, op_qty, op_px); st.rerun()
 
 with c_right:
-    tabs = st.tabs(["💎 Valuación", "🆚 Alpha", "🔮 Monte Carlo", "📈 Gráfico", "🔥 Heatmap"])
+    tabs = st.tabs(["📰 Noticias & IA", "💎 Valuación", "🆚 Alpha", "🔮 Monte Carlo", "📈 Gráfico", "🔥 Heatmap"])
     
-    # PESTAÑA 1: VALUACIÓN FUNDAMENTAL (NUEVA V43)
+    # PESTAÑA 1: NOTICIAS IA (NUEVA V44)
     with tabs[0]:
-        st.subheader(f"💎 Análisis Fundamental: {tk}")
-        st.write("¿Está la empresa barata o cara según sus libros contables?")
+        st.subheader(f"📰 Sentimiento del Mercado: {tk}")
         
-        with st.spinner(f"Analizando balances de {tk}..."):
-            val_data = calcular_valor_intrinseco(tk)
-            
-            if val_data:
-                col_v1, col_v2 = st.columns(2)
+        if st.button("🤖 ANALIZAR NOTICIAS CON IA"):
+            with st.spinner("Leyendo las noticias globales... (Esto toma unos segundos)"):
+                news_data = analizar_noticias_ia(tk)
                 
-                with col_v1:
-                    st.metric("Precio de Mercado", f"${val_data['Precio']:.2f}")
-                    st.metric("Valor Graham (Activos)", f"${val_data['Graham']:.2f}", 
-                              f"{val_data['Diff_Graham']:.1f}% vs Precio", 
-                              delta_color="normal") # Verde si Graham > Precio
+                if news_data and "error" not in news_data:
+                    # GAUGE DE SENTIMIENTO
+                    score = news_data.get('score', 0)
+                    color_gauge = "grey"
+                    if score > 20: color_gauge = "green"
+                    elif score < -20: color_gauge = "red"
                     
-                    if val_data['Status_Graham'] == "INFRAVALORADA 🟢":
-                        st.success(f"Según Graham, {tk} está BARATA (Margen de Seguridad).")
-                    else:
-                        st.error(f"Según Graham, {tk} está CARA (Posible Burbuja).")
+                    c1, c2 = st.columns([1, 3])
+                    with c1:
+                        st.markdown(f"""
+                        <div style="text-align:center; padding:20px; background-color:{color_gauge}; border-radius:10px;">
+                            <h1 style="color:white; margin:0;">{score}</h1>
+                            <p style="color:white; margin:0;">SCORE IA (-100 a +100)</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with c2:
+                        st.info("💡 " + news_data.get('summary', 'Sin resumen'))
+                    
+                    st.divider()
+                    st.markdown("### 🗞️ Titulares Analizados")
+                    for i, head in enumerate(news_data['headlines']):
+                        st.markdown(f"- [{head}]({news_data['links'][i]})")
                         
-                with col_v2:
-                    st.markdown("#### Ratios Clave")
-                    st.write(f"**PER (P/E Ratio):** {val_data['PER']}")
-                    st.write(f"**EPS (Ganancia x Acción):** ${val_data['EPS']}")
-                    st.write(f"**Valor Libro:** ${val_data['BookValue']}")
-                    st.write(f"**Crecimiento Esperado:** {val_data['Growth']:.2f}%")
-                    
-                    if val_data['Lynch'] > 0:
-                        st.metric("Valor Justo (Peter Lynch)", f"${val_data['Lynch']:.2f}", help="Basado en crecimiento")
-
-            else:
-                st.warning("No se pudieron obtener datos fundamentales completos para este activo (quizás es un ETF o Crypto).")
+                else:
+                    st.error("No se pudieron obtener noticias recientes o hubo un error con la IA.")
+                    if news_data: st.write(news_data)
 
     with tabs[1]:
-        # (Código Alpha V42)
+        val_data = calcular_valor_intrinseco(tk)
+        if val_data:
+            c1, c2 = st.columns(2)
+            c1.metric("Precio", f"${val_data['Precio']:.2f}")
+            c1.metric("Graham", f"${val_data['Graham']:.2f}", f"{val_data['Diff']:.1f}%")
+            if val_data['Status_Graham'] == "INFRAVALORADA 🟢": st.success("BARATA (Graham)")
+            else: st.error("CARA (Graham)")
+
+    with tabs[2]:
         norm_data, metrics = calcular_alpha_beta(tk)
         if norm_data is not None:
             c1, c2 = st.columns(2)
             c1.metric("Beta", f"{metrics['Beta']:.2f}")
             c2.metric("Alpha", f"{metrics['Alpha Total %']:.2f}%")
-            fig_comp = px.line(norm_data, x=norm_data.index, y=norm_data.columns, title="Rendimiento Relativo")
-            st.plotly_chart(fig_comp, use_container_width=True)
+            st.plotly_chart(px.line(norm_data, x=norm_data.index, y=norm_data.columns), use_container_width=True)
 
-    with tabs[2]:
+    with tabs[3]:
         dias_mc = st.slider("Días", 10, 90, 30)
         if st.button("🎲 Simular"):
             fig_mc, res_mc = simular_montecarlo(tk, dias_mc)
             if fig_mc: st.plotly_chart(fig_mc, use_container_width=True)
 
-    with tabs[3]:
+    with tabs[4]:
         fig = graficar_master(tk)
         if fig: st.plotly_chart(fig, use_container_width=True)
         
-    with tabs[4]:
+    with tabs[5]:
         df_map = generar_mapa_calor(WATCHLIST)
         if df_map is not None:
             fig_map = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
