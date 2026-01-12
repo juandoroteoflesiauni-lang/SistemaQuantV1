@@ -43,10 +43,13 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V56 (Robust Data)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Sistema Quant V57 (Watchtower)", layout="wide", page_icon="🔔")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
     .report-box {background-color: #1e1e1e; border-left: 5px solid #FFD700; padding: 20px; border-radius: 5px; margin-bottom: 20px;}
+    .alert-card-high {background-color: #3d0e0e; border: 1px solid #ff4b4b; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
+    .alert-card-med {background-color: #3d3d0e; border: 1px solid #ffa500; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
+    .alert-card-low {background-color: #0e2b0e; border: 1px solid #00cc96; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
     .stTabs [data-baseweb="tab-list"] {gap: 10px;}
     .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
     .stTabs [aria-selected="true"] {background-color: #262730;}
@@ -54,15 +57,9 @@ st.markdown("""<style>
 
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
 
-# TICKERS MACRO (Verificados)
 MACRO_DICT = {
-    'S&P 500': 'SPY',         # ETF Liquido
-    'Nasdaq 100': 'QQQ',      # ETF Liquido
-    'VIX (Miedo)': '^VIX',    # Indice Volatilidad
-    'Bonos 10Y': '^TNX',      # Treasury Yield 10 Years
-    'Dólar Index': 'DX-Y.NYB',# Dolar vs Canasta
-    'Petróleo': 'CL=F',       # Futuros Crudo
-    'Oro': 'GC=F'             # Futuros Oro
+    'S&P 500': 'SPY', 'Nasdaq 100': 'QQQ', 'VIX (Miedo)': '^VIX',
+    'Bonos 10Y': '^TNX', 'Dólar Index': 'DX-Y.NYB', 'Petróleo': 'CL=F', 'Oro': 'GC=F'
 }
 DB_NAME = "quant_database.db"
 
@@ -111,77 +108,92 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR ESTRATEGA MACRO (CORREGIDO V56) ---
-@st.cache_data(ttl=600) # Cache para no descargar a cada rato
+# --- MOTOR WATCHTOWER (NUEVO V57) ---
+@st.cache_data(ttl=600)
+def generar_feed_alertas(tickers):
+    """Escanea Golden Cross, RSI Extremo y Ballenas"""
+    alertas = []
+    try:
+        # Descarga masiva eficiente (1 año para medias móviles largas)
+        data = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
+    except: return []
+
+    for t in tickers:
+        try:
+            if len(tickers) > 1: df = data[t].dropna()
+            else: df = data.dropna()
+            
+            if len(df) < 200: continue # Necesitamos 200 días para Golden Cross
+            
+            # Cálculo de Indicadores
+            close = df['Close']
+            rsi = ta.rsi(close, 14).iloc[-1]
+            sma50 = ta.sma(close, 50)
+            sma200 = ta.sma(close, 200)
+            
+            curr_50 = sma50.iloc[-1]
+            prev_50 = sma50.iloc[-2]
+            curr_200 = sma200.iloc[-1]
+            prev_200 = sma200.iloc[-2]
+            
+            # 1. GOLDEN CROSS (Cruce Dorado) - Muy Alcista
+            if prev_50 < prev_200 and curr_50 > curr_200:
+                alertas.append({"Ticker": t, "Nivel": "ALTA", "Mensaje": "🌟 GOLDEN CROSS: SMA50 cruzó SMA200 al alza. Tendencia Alcista Mayor."})
+                
+            # 2. DEATH CROSS (Cruce de la Muerte) - Muy Bajista
+            if prev_50 > prev_200 and curr_50 < curr_200:
+                alertas.append({"Ticker": t, "Nivel": "ALTA", "Mensaje": "☠️ DEATH CROSS: SMA50 cruzó SMA200 a la baja. Peligro."})
+                
+            # 3. RSI EXTREMO
+            if rsi < 25:
+                alertas.append({"Ticker": t, "Nivel": "MEDIA", "Mensaje": f"🟢 Sobreventa Extrema (RSI {rsi:.0f}). Posible rebote."})
+            elif rsi > 75:
+                alertas.append({"Ticker": t, "Nivel": "MEDIA", "Mensaje": f"🔴 Sobrecompra Extrema (RSI {rsi:.0f}). Riesgo de corrección."})
+                
+            # 4. BALLENAS (Volumen > 200% promedio)
+            vol_hoy = df['Volume'].iloc[-1]
+            vol_avg = df['Volume'].rolling(20).mean().iloc[-1]
+            if vol_hoy > vol_avg * 2.0:
+                alertas.append({"Ticker": t, "Nivel": "BAJA", "Mensaje": f"🐋 Volumen Inusual ({vol_hoy/vol_avg:.1f}x). Actividad Institucional."})
+                
+        except: pass
+        
+    return alertas
+
+# --- MOTORES EXISTENTES ---
 def obtener_panorama_macro():
-    """Descarga datos macro INDIVIDUALMENTE para evitar errores de NaN en bloque"""
     resumen = {}
-    
     for nombre, ticker in MACRO_DICT.items():
         try:
-            # Descarga individual blindada
             data = yf.Ticker(ticker).history(period="5d")
-            
             if not data.empty:
-                precio = data['Close'].iloc[-1]
-                previo = data['Close'].iloc[-2]
-                delta = ((precio - previo) / previo) * 100
-                
-                resumen[nombre] = {
-                    "Precio": precio,
-                    "Cambio%": delta,
-                    "Tendencia": "Alcista" if precio > data['Close'].mean() else "Bajista"
-                }
-            else:
-                # Si falla, valores cero
-                resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0, "Tendencia": "N/A"}
-                
-        except Exception as e:
-            resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0, "Tendencia": "Error"}
-            
+                precio = data['Close'].iloc[-1]; previo = data['Close'].iloc[-2]
+                resumen[nombre] = {"Precio": precio, "Cambio%": ((precio - previo) / previo) * 100}
+            else: resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0}
+        except: resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0}
     return resumen
 
 def generar_briefing_ia(datos_macro):
     try:
-        rss_url = "https://news.google.com/rss/topics/CAAqJggBCiJCAQAqSVgQASowCAAqLAgKIiZDQW1TRWdrTWFnZ0tDaElVWjI5dlozbG5hVzV6ZEdGaWJDNXpLQUFQAQ?hl=en-US&gl=US&ceid=US%3Aen"
-        feed = feedparser.parse(rss_url)
-        titulares = [entry.title for entry in feed.entries[:5]] if feed.entries else ["Sin noticias"]
-        
-        texto_datos = "\n".join([f"{k}: {v['Precio']:.2f} ({v['Cambio%']:+.2f}%)" for k, v in datos_macro.items()])
-        
-        prompt = f"""
-        Eres un Estratega Senior de Wall Street. Escribe un 'Morning Briefing' breve en ESPAÑOL.
-        
-        DATOS:
-        {texto_datos}
-        
-        NOTICIAS:
-        {titulares}
-        
-        Analiza Bonos (TNX) vs Tech (QQQ) vs Miedo (VIX). ¿Risk On o Risk Off hoy? Sé directo.
-        """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e: return f"Sistema Offline: {e}"
+        rss = "https://news.google.com/rss/topics/CAAqJggBCiJCAQAqSVgQASowCAAqLAgKIiZDQW1TRWdrTWFnZ0tDaElVWjI5dlozbG5hVzV6ZEdGaWJDNXpLQUFQAQ?hl=en-US&gl=US&ceid=US%3Aen"
+        feed = feedparser.parse(rss); titulares = [e.title for e in feed.entries[:5]] if feed.entries else []
+        txt = "\n".join([f"{k}: {v['Precio']:.2f}" for k,v in datos_macro.items()])
+        p = f"Escribe un 'Morning Briefing' financiero breve en español basado en:\nDATOS:{txt}\nNOTICIAS:{titulares}\nAnaliza sentimiento Risk-On/Risk-Off."
+        return model.generate_content(p).text
+    except Exception as e: return f"Error IA: {e}"
 
-# --- MOTORES EXISTENTES ---
 def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
     try:
-        todos_tickers = tickers + [benchmark]
-        data = yf.download(" ".join(todos_tickers), period=periodo, progress=False, auto_adjust=True)['Close']
-        if data.empty: return None, None
-        retornos = data.pct_change().dropna()
-        bench_ret = (1 + retornos[benchmark]).cumprod(); bench_ret = (bench_ret / bench_ret.iloc[0]) * 100 
-        retornos_cartera = retornos[tickers].dot(list(pesos.values()))
-        port_ret = (1 + retornos_cartera).cumprod(); port_ret = (port_ret / port_ret.iloc[0]) * 100 
-        cagr_port = ((port_ret.iloc[-1] / port_ret.iloc[0]) ** (252/len(port_ret)) - 1) * 100
-        cagr_bench = ((bench_ret.iloc[-1] / bench_ret.iloc[0]) ** (252/len(bench_ret)) - 1) * 100
-        vol_port = retornos_cartera.std() * np.sqrt(252) * 100
-        sharpe = (cagr_port - 4.0) / vol_port 
-        df_chart = pd.DataFrame({"Mi Cartera": port_ret, "Mercado (SPY)": bench_ret})
-        stats = {"CAGR Cartera": cagr_port, "CAGR Mercado": cagr_bench, "Volatilidad": vol_port, "Sharpe": sharpe, "Alpha": cagr_port - cagr_bench}
-        return df_chart, stats
-    except Exception as e: return None, str(e)
+        todos = tickers + [benchmark]
+        d = yf.download(" ".join(todos), period=periodo, progress=False, auto_adjust=True)['Close']
+        if d.empty: return None, None
+        r = d.pct_change().dropna()
+        br = (1+r[benchmark]).cumprod(); br=(br/br.iloc[0])*100
+        rc = r[tickers].dot(list(pesos.values())); pr=(1+rc).cumprod(); pr=(pr/pr.iloc[0])*100
+        c_p = ((pr.iloc[-1]/pr.iloc[0])**(252/len(pr))-1)*100
+        vol = rc.std()*np.sqrt(252)*100
+        return pd.DataFrame({"Cartera": pr, "SPY": br}), {"CAGR": c_p, "Vol": vol, "Sharpe": (c_p-4)/vol}
+    except: return None, None
 
 def calcular_matriz_correlacion(tickers):
     try:
@@ -195,10 +207,10 @@ def detectar_actividad_ballenas(ticker):
         if df.empty: return None
         df['VWAP'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
         df['VolSMA'] = df['Volume'].rolling(20).mean()
-        last_vol = df['Volume'].iloc[-1]; last_avg = df['VolSMA'].iloc[-1]
-        alerta = "🐋 ALERTA BALLENA" if last_vol > last_avg * 1.5 else None
-        trend = "ALCISTA (Inst.)" if df['Close'].iloc[-1] > df['VWAP'].iloc[-1] else "BAJISTA (Inst.)"
-        return {"Volumen Hoy": last_vol, "Ratio Vol": last_vol/last_avg, "Alerta": alerta, "VWAP": df['VWAP'].iloc[-1], "Tendencia": trend}
+        v = df['Volume'].iloc[-1]; va = df['VolSMA'].iloc[-1]
+        alerta = "🐋 ALERTA" if v > va * 1.5 else None
+        trend = "ALCISTA" if df['Close'].iloc[-1] > df['VWAP'].iloc[-1] else "BAJISTA"
+        return {"Volumen Hoy": v, "Ratio Vol": v/va, "Alerta": alerta, "VWAP": df['VWAP'].iloc[-1], "Tendencia": trend}
     except: return None
 
 @st.cache_data(ttl=600)
@@ -230,9 +242,7 @@ def calcular_score_quant(ticker):
     except: return 0, b
 
 def dibujar_velocimetro(score):
-    return go.Figure(go.Indicator(mode="gauge+number", value=score, domain={'x': [0, 1], 'y': [0, 1]},
-        gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "white"},
-               'steps': [{'range': [0, 40], 'color': "#ff4b4b"}, {'range': [40, 70], 'color': "#ffa500"}, {'range': [70, 100], 'color': "#00cc96"}]})).update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), paper_bgcolor="#0e1117", font={'color': "white"})
+    return go.Figure(go.Indicator(mode="gauge+number", value=score, domain={'x': [0, 1], 'y': [0, 1]}, gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "white"}, 'steps': [{'range': [0, 40], 'color': "#ff4b4b"}, {'range': [40, 70], 'color': "#ffa500"}, {'range': [70, 100], 'color': "#00cc96"}]})).update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), paper_bgcolor="#0e1117", font={'color': "white"})
 
 def graficar_master(ticker):
     try:
@@ -281,51 +291,59 @@ def optimizar_parametros_estrategia(ticker):
         return pd.DataFrame(r)
     except: return pd.DataFrame()
 
-# --- INTERFAZ V56: ROBUST MACRO ---
-st.title("🧠 Sistema Quant V56: Macro Strategist")
+# --- INTERFAZ V57: THE WATCHTOWER ---
+st.title("🔔 Sistema Quant V57: Watchtower")
 
 df_pos = auditar_posiciones_sql()
+
+# PANEL DE ALERTAS (NUEVO V57)
+with st.sidebar:
+    st.header("🔔 Centro de Alertas")
+    with st.spinner("Escaneando mercado..."):
+        alertas = generar_feed_alertas(WATCHLIST)
+    
+    if alertas:
+        for a in alertas:
+            estilo = "alert-card-low"
+            icono = "ℹ️"
+            if a['Nivel'] == "ALTA": estilo = "alert-card-high"; icono = "🚨"
+            elif a['Nivel'] == "MEDIA": estilo = "alert-card-med"; icono = "⚠️"
+            
+            st.markdown(f"""
+            <div class='{estilo}'>
+                <strong>{icono} {a['Ticker']}</strong><br>
+                <small>{a['Mensaje']}</small>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.success("✅ Todo tranquilo en el mercado.")
+
+# DASHBOARD KPI
 col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
 with col_kpi1: st.metric("Patrimonio", f"${df_pos['Valor Mercado'].sum() if not df_pos.empty else 0:,.2f}")
 with col_kpi2: st.metric("P&L Total", f"${df_pos['P&L ($)'].sum() if not df_pos.empty else 0:+.2f}")
 with col_kpi3: st.metric("Mercado (SPY)", f"${yf.Ticker('SPY').history(period='1d')['Close'].iloc[-1]:.2f}")
-with col_kpi4: 
-    w = detectar_actividad_ballenas(WATCHLIST[0])
-    st.metric("Alerta Ballena", "Activa" if w and w['Alerta'] else "Ninguna")
+with col_kpi4: st.metric("Alertas Activas", f"{len(alertas)}")
 
 st.divider()
 
 main_tabs = st.tabs(["🧠 ESTRATEGIA MACRO", "💼 MESA DE DINERO", "📊 ANÁLISIS 360", "🧬 LABORATORIO QUANT"])
 
-# --- TAB 1: ESTRATEGIA MACRO (ROBUSTA V56) ---
+# --- TAB 1: ESTRATEGIA MACRO ---
 with main_tabs[0]:
     st.subheader("📰 Informe de Inteligencia de Mercado")
-    
-    with st.spinner("Descargando datos macro globales (blindado)..."):
+    with st.spinner("Cargando datos macro..."):
         macro_data = obtener_panorama_macro()
-    
     if macro_data:
-        # Fila 1 de Cintas
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("S&P 500", f"{macro_data['S&P 500']['Precio']:,.2f}", f"{macro_data['S&P 500']['Cambio%']:+.2f}%")
-        c2.metric("Nasdaq", f"{macro_data['Nasdaq 100']['Precio']:,.2f}", f"{macro_data['Nasdaq 100']['Cambio%']:+.2f}%")
-        c3.metric("VIX (Miedo)", f"{macro_data['VIX (Miedo)']['Precio']:.2f}", f"{macro_data['VIX (Miedo)']['Cambio%']:+.2f}%", delta_color="inverse")
-        c4.metric("Bonos 10Y", f"{macro_data['Bonos 10Y']['Precio']:.2f}%", f"{macro_data['Bonos 10Y']['Cambio%']:+.2f}%")
-        
-        # Fila 2 de Cintas
-        c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Dólar (DXY)", f"{macro_data['Dólar Index']['Precio']:.2f}", f"{macro_data['Dólar Index']['Cambio%']:+.2f}%")
-        c6.metric("Petróleo", f"${macro_data['Petróleo']['Precio']:.2f}", f"{macro_data['Petróleo']['Cambio%']:+.2f}%")
-        c7.metric("Oro", f"${macro_data['Oro']['Precio']:,.0f}", f"{macro_data['Oro']['Cambio%']:+.2f}%")
-        c8.empty()
-        
+        cols_macro = st.columns(len(macro_data))
+        for i, (k, v) in enumerate(macro_data.items()):
+            color = "normal" if k != "VIX (Miedo)" else "inverse"
+            cols_macro[i].metric(k, f"{v['Precio']:,.2f}", f"{v['Cambio%']:+.2f}%", delta_color=color)
         st.write("---")
-        
         if st.button("🤖 REDACTAR BRIEFING ESTRATÉGICO"):
-            with st.spinner("Analizando correlaciones macroeconómicas..."):
+            with st.spinner("Analizando..."):
                 briefing = generar_briefing_ia(macro_data)
                 st.markdown(f"<div class='report-box'><h3>🎙️ Morning Briefing (AI)</h3>{briefing}</div>", unsafe_allow_html=True)
-                st.caption("Generado por Gemini AI.")
 
 # --- TAB 2: OPERATIVA ---
 with main_tabs[1]:
@@ -367,7 +385,7 @@ with main_tabs[3]:
             pesos = {t: 1.0/len(sim_tickers) for t in sim_tickers}
             df_ch, st_ch = simular_cartera_historica(sim_tickers, pesos)
             if df_ch is not None:
-                st.metric("CAGR", f"{st_ch['CAGR Cartera']:.1f}%")
+                st.metric("CAGR", f"{st_ch['CAGR']:.1f}%")
                 st.plotly_chart(px.line(df_ch, color_discrete_map={"Mi Cartera": "#00ff00", "Mercado (SPY)": "grey"}), use_container_width=True)
     with sub_tabs[2]:
         if st.button("🚀 Optimizar"):
