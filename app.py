@@ -43,7 +43,7 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V55 (Macro Strategist)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Sistema Quant V56 (Robust Data)", layout="wide", page_icon="🛡️")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
     .report-box {background-color: #1e1e1e; border-left: 5px solid #FFD700; padding: 20px; border-radius: 5px; margin-bottom: 20px;}
@@ -53,15 +53,16 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
-# TICKERS MACRO CLAVE
+
+# TICKERS MACRO (Verificados)
 MACRO_DICT = {
-    'S&P 500': 'SPY',
-    'Nasdaq 100': 'QQQ',
-    'VIX (Miedo)': '^VIX',
-    'Bonos 10Y': '^TNX',
-    'Dólar Index': 'DX-Y.NYB',
-    'Petróleo': 'CL=F',
-    'Oro': 'GC=F'
+    'S&P 500': 'SPY',         # ETF Liquido
+    'Nasdaq 100': 'QQQ',      # ETF Liquido
+    'VIX (Miedo)': '^VIX',    # Indice Volatilidad
+    'Bonos 10Y': '^TNX',      # Treasury Yield 10 Years
+    'Dólar Index': 'DX-Y.NYB',# Dolar vs Canasta
+    'Petróleo': 'CL=F',       # Futuros Crudo
+    'Oro': 'GC=F'             # Futuros Oro
 }
 DB_NAME = "quant_database.db"
 
@@ -110,63 +111,58 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR ESTRATEGA MACRO (NUEVO V55) ---
+# --- MOTOR ESTRATEGA MACRO (CORREGIDO V56) ---
+@st.cache_data(ttl=600) # Cache para no descargar a cada rato
 def obtener_panorama_macro():
-    """Descarga datos de todos los indicadores macro clave"""
-    try:
-        tickers = list(MACRO_DICT.values())
-        df = yf.download(" ".join(tickers), period="5d", progress=False, group_by='ticker', auto_adjust=True)
-        
-        resumen = {}
-        for nombre, tick in MACRO_DICT.items():
-            try:
-                if len(tickers) > 1: serie = df[tick]['Close']
-                else: serie = df['Close']
-                
-                precio = serie.iloc[-1]
-                previo = serie.iloc[-2]
+    """Descarga datos macro INDIVIDUALMENTE para evitar errores de NaN en bloque"""
+    resumen = {}
+    
+    for nombre, ticker in MACRO_DICT.items():
+        try:
+            # Descarga individual blindada
+            data = yf.Ticker(ticker).history(period="5d")
+            
+            if not data.empty:
+                precio = data['Close'].iloc[-1]
+                previo = data['Close'].iloc[-2]
                 delta = ((precio - previo) / previo) * 100
                 
                 resumen[nombre] = {
                     "Precio": precio,
                     "Cambio%": delta,
-                    "Tendencia": "Alcista" if precio > serie.mean() else "Bajista"
+                    "Tendencia": "Alcista" if precio > data['Close'].mean() else "Bajista"
                 }
-            except: pass
-        return resumen
-    except: return None
+            else:
+                # Si falla, valores cero
+                resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0, "Tendencia": "N/A"}
+                
+        except Exception as e:
+            resumen[nombre] = {"Precio": 0.0, "Cambio%": 0.0, "Tendencia": "Error"}
+            
+    return resumen
 
 def generar_briefing_ia(datos_macro):
-    """Usa IA para redactar un informe de mercado basado en datos"""
     try:
-        # 1. Obtener titulares globales
-        rss_url = "https://news.google.com/rss/topics/CAAqJggBCiJCAQAqSVgQASowCAAqLAgKIiZDQW1TRWdrTWFnZ0tDaElVWjI5dlozbG5hVzV6ZEdGaWJDNXpLQUFQAQ?hl=en-US&gl=US&ceid=US%3Aen" # Business News
+        rss_url = "https://news.google.com/rss/topics/CAAqJggBCiJCAQAqSVgQASowCAAqLAgKIiZDQW1TRWdrTWFnZ0tDaElVWjI5dlozbG5hVzV6ZEdGaWJDNXpLQUFQAQ?hl=en-US&gl=US&ceid=US%3Aen"
         feed = feedparser.parse(rss_url)
         titulares = [entry.title for entry in feed.entries[:5]] if feed.entries else ["Sin noticias"]
         
-        # 2. Construir Prompt con Datos Reales
         texto_datos = "\n".join([f"{k}: {v['Precio']:.2f} ({v['Cambio%']:+.2f}%)" for k, v in datos_macro.items()])
         
         prompt = f"""
-        Actúa como un Estratega Jefe de Inversiones en Wall Street. Escribe un 'Morning Briefing' (Informe Matutino) en ESPAÑOL.
+        Eres un Estratega Senior de Wall Street. Escribe un 'Morning Briefing' breve en ESPAÑOL.
         
-        DATOS DE MERCADO HOY:
+        DATOS:
         {texto_datos}
         
-        TITULARES CLAVE:
+        NOTICIAS:
         {titulares}
         
-        Tu tarea:
-        1. Analiza la relación entre los Bonos (TNX), el VIX y el S&P 500.
-        2. Explica qué está moviendo al mercado hoy.
-        3. Da una recomendación general: ¿Es día de 'Risk On' (Apetito de riesgo) o 'Risk Off' (Cautela)?
-        
-        Formato: Usa Markdown, sé conciso, profesional y directo. Máximo 150 palabras.
+        Analiza Bonos (TNX) vs Tech (QQQ) vs Miedo (VIX). ¿Risk On o Risk Off hoy? Sé directo.
         """
-        
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e: return f"Error generando informe: {e}"
+    except Exception as e: return f"Sistema Offline: {e}"
 
 # --- MOTORES EXISTENTES ---
 def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
@@ -285,10 +281,9 @@ def optimizar_parametros_estrategia(ticker):
         return pd.DataFrame(r)
     except: return pd.DataFrame()
 
-# --- INTERFAZ V55: MACRO STRATEGIST ---
-st.title("🧠 Sistema Quant V55: Macro Strategist")
+# --- INTERFAZ V56: ROBUST MACRO ---
+st.title("🧠 Sistema Quant V56: Macro Strategist")
 
-# DASHBOARD KPI
 df_pos = auditar_posiciones_sql()
 col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
 with col_kpi1: st.metric("Patrimonio", f"${df_pos['Valor Mercado'].sum() if not df_pos.empty else 0:,.2f}")
@@ -302,31 +297,35 @@ st.divider()
 
 main_tabs = st.tabs(["🧠 ESTRATEGIA MACRO", "💼 MESA DE DINERO", "📊 ANÁLISIS 360", "🧬 LABORATORIO QUANT"])
 
-# --- TAB 1: ESTRATEGIA MACRO (NUEVO V55) ---
+# --- TAB 1: ESTRATEGIA MACRO (ROBUSTA V56) ---
 with main_tabs[0]:
     st.subheader("📰 Informe de Inteligencia de Mercado")
     
-    # Obtener Datos
-    macro_data = obtener_panorama_macro()
+    with st.spinner("Descargando datos macro globales (blindado)..."):
+        macro_data = obtener_panorama_macro()
     
     if macro_data:
-        # Mostrar Cintas
-        cols_macro = st.columns(len(macro_data))
-        for i, (k, v) in enumerate(macro_data.items()):
-            delta = v['Cambio%']
-            color = "normal" if k != "VIX (Miedo)" else "inverse" # VIX al revés
-            cols_macro[i].metric(k, f"{v['Precio']:,.2f}", f"{delta:+.2f}%", delta_color=color)
+        # Fila 1 de Cintas
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("S&P 500", f"{macro_data['S&P 500']['Precio']:,.2f}", f"{macro_data['S&P 500']['Cambio%']:+.2f}%")
+        c2.metric("Nasdaq", f"{macro_data['Nasdaq 100']['Precio']:,.2f}", f"{macro_data['Nasdaq 100']['Cambio%']:+.2f}%")
+        c3.metric("VIX (Miedo)", f"{macro_data['VIX (Miedo)']['Precio']:.2f}", f"{macro_data['VIX (Miedo)']['Cambio%']:+.2f}%", delta_color="inverse")
+        c4.metric("Bonos 10Y", f"{macro_data['Bonos 10Y']['Precio']:.2f}%", f"{macro_data['Bonos 10Y']['Cambio%']:+.2f}%")
+        
+        # Fila 2 de Cintas
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Dólar (DXY)", f"{macro_data['Dólar Index']['Precio']:.2f}", f"{macro_data['Dólar Index']['Cambio%']:+.2f}%")
+        c6.metric("Petróleo", f"${macro_data['Petróleo']['Precio']:.2f}", f"{macro_data['Petróleo']['Cambio%']:+.2f}%")
+        c7.metric("Oro", f"${macro_data['Oro']['Precio']:,.0f}", f"{macro_data['Oro']['Cambio%']:+.2f}%")
+        c8.empty()
         
         st.write("---")
         
-        # Generar Informe IA
         if st.button("🤖 REDACTAR BRIEFING ESTRATÉGICO"):
-            with st.spinner("Analizando bonos, divisas y noticias globales..."):
+            with st.spinner("Analizando correlaciones macroeconómicas..."):
                 briefing = generar_briefing_ia(macro_data)
                 st.markdown(f"<div class='report-box'><h3>🎙️ Morning Briefing (AI)</h3>{briefing}</div>", unsafe_allow_html=True)
-                st.caption("Generado por Gemini AI basándose en datos de mercado en tiempo real y noticias RSS.")
-    else:
-        st.warning("Cargando datos macroeconómicos...")
+                st.caption("Generado por Gemini AI.")
 
 # --- TAB 2: OPERATIVA ---
 with main_tabs[1]:
@@ -338,8 +337,8 @@ with main_tabs[1]:
     with c2:
         with st.form("op"):
             t = st.selectbox("Ticker", WATCHLIST); tp = st.selectbox("Tipo", ["COMPRA", "VENTA"])
-            q = st.number_input("Qty", 1, 10000); p = st.number_input("Precio", 0.0)
-            if st.form_submit_button("Ejecutar"): registrar_operacion_sql(t, tp, q, p); st.rerun()
+            q = st.number_input("Qty", 1, 10000); precio_ejec = st.number_input("Precio", 0.0)
+            if st.form_submit_button("Ejecutar"): registrar_operacion_sql(t, tp, q, precio_ejec); st.rerun()
 
 # --- TAB 3: ANÁLISIS ---
 with main_tabs[2]:
@@ -373,4 +372,4 @@ with main_tabs[3]:
     with sub_tabs[2]:
         if st.button("🚀 Optimizar"):
             r = optimizar_parametros_estrategia(sel_ticker)
-            if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True) 
+            if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
