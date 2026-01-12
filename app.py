@@ -43,7 +43,7 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V53 (Architect)", layout="wide", page_icon="🏗️")
+st.set_page_config(page_title="Sistema Quant V54 (Risk Manager)", layout="wide", page_icon="🔗")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
     .whale-alert {background-color: #4a148c; border: 1px solid #ea00ff; padding: 10px; border-radius: 5px; text-align: center; color: white; font-weight: bold;}
@@ -100,55 +100,38 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR PORTFOLIO ARCHITECT (NUEVO V53) ---
-def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
-    """Simula el rendimiento de una cartera ponderada vs SPY"""
+# --- MOTOR DE CORRELACIÓN Y RIESGO (NUEVO V54) ---
+def calcular_matriz_correlacion(tickers, periodo="1y"):
+    """Calcula la matriz de correlación de Pearson"""
     try:
-        # Descargar datos de todos los activos + benchmark
+        data = yf.download(" ".join(tickers), period=periodo, progress=False, auto_adjust=True)['Close']
+        if data.empty: return None
+        
+        # Retornos logarítmicos son mejores para correlación estadística
+        log_ret = np.log(data / data.shift(1))
+        corr_matrix = log_ret.corr()
+        return corr_matrix
+    except: return None
+
+# --- MOTORES EXISTENTES (SIMULADOR, ETC) ---
+def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
+    try:
         todos_tickers = tickers + [benchmark]
         data = yf.download(" ".join(todos_tickers), period=periodo, progress=False, auto_adjust=True)['Close']
-        
         if data.empty: return None, None
-        
-        # Calcular retornos diarios
         retornos = data.pct_change().dropna()
-        
-        # Retorno del Benchmark acumulado
-        bench_ret = (1 + retornos[benchmark]).cumprod()
-        bench_ret = (bench_ret / bench_ret.iloc[0]) * 100 # Base 100
-        
-        # Retorno de la Cartera Ponderada
-        # Matriz de retornos (solo tickers cartera) * vector de pesos
-        # Aseguramos orden correcto de columnas
+        bench_ret = (1 + retornos[benchmark]).cumprod(); bench_ret = (bench_ret / bench_ret.iloc[0]) * 100 
         retornos_cartera = retornos[tickers].dot(list(pesos.values()))
-        port_ret = (1 + retornos_cartera).cumprod()
-        port_ret = (port_ret / port_ret.iloc[0]) * 100 # Base 100
-        
-        # Métricas Finales
+        port_ret = (1 + retornos_cartera).cumprod(); port_ret = (port_ret / port_ret.iloc[0]) * 100 
         cagr_port = ((port_ret.iloc[-1] / port_ret.iloc[0]) ** (252/len(port_ret)) - 1) * 100
         cagr_bench = ((bench_ret.iloc[-1] / bench_ret.iloc[0]) ** (252/len(bench_ret)) - 1) * 100
-        
         vol_port = retornos_cartera.std() * np.sqrt(252) * 100
-        sharpe = (cagr_port - 4.0) / vol_port # Asumiendo 4% tasa libre riesgo
-        
-        df_chart = pd.DataFrame({
-            "Mi Cartera": port_ret,
-            "Mercado (SPY)": bench_ret
-        })
-        
-        stats = {
-            "CAGR Cartera": cagr_port,
-            "CAGR Mercado": cagr_bench,
-            "Volatilidad": vol_port,
-            "Sharpe": sharpe,
-            "Alpha": cagr_port - cagr_bench
-        }
-        
+        sharpe = (cagr_port - 4.0) / vol_port 
+        df_chart = pd.DataFrame({"Mi Cartera": port_ret, "Mercado (SPY)": bench_ret})
+        stats = {"CAGR Cartera": cagr_port, "CAGR Mercado": cagr_bench, "Volatilidad": vol_port, "Sharpe": sharpe, "Alpha": cagr_port - cagr_bench}
         return df_chart, stats
-        
     except Exception as e: return None, str(e)
 
-# --- MOTORES EXISTENTES ---
 def detectar_actividad_ballenas(ticker):
     try:
         df = yf.Ticker(ticker).history(period="1mo", interval="1d", auto_adjust=True)
@@ -241,10 +224,9 @@ def optimizar_parametros_estrategia(ticker):
         return pd.DataFrame(r)
     except: return pd.DataFrame()
 
-# --- INTERFAZ V53: ARCHITECT ---
-st.title("🏗️ Sistema Quant V53: The Architect")
+# --- INTERFAZ V54: RISK MANAGER ---
+st.title("🔗 Sistema Quant V54: Risk Manager")
 
-# DASHBOARD KPI
 df_pos = auditar_posiciones_sql()
 col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
 with col_kpi1: st.metric("Patrimonio", f"${df_pos['Valor Mercado'].sum() if not df_pos.empty else 0:,.2f}")
@@ -284,63 +266,61 @@ with main_tabs[1]:
         f = graficar_master(sel_ticker)
         if f: st.plotly_chart(f, use_container_width=True)
 
-# --- TAB 3: LABORATORIO (NUEVO V53) ---
+# --- TAB 3: LABORATORIO (NUEVO V54) ---
 with main_tabs[2]:
-    sub_tabs = st.tabs(["🏗️ Backtest Cartera", "🧬 Optimización Genética"])
+    sub_tabs = st.tabs(["🔗 Matriz Correlación", "🏗️ Backtest Cartera", "🧬 Optimización"])
     
-    # BACKTESTER DE CARTERA MULTI-ACTIVO (V53)
+    # 1. MATRIZ DE CORRELACIÓN (V54)
     with sub_tabs[0]:
-        st.subheader("🏗️ Simulador de Rendimiento de Cartera")
-        st.write("Compara una cartera hipotética contra el S&P 500.")
+        st.subheader("🔗 Mapa de Diversificación y Riesgo")
+        st.write("Analiza si tus activos se mueven juntos (Rojo) o diversificados (Azul/Gris).")
         
-        col_b1, col_b2 = st.columns([1, 2])
+        # Selección múltiple
+        default_corr = df_pos['Ticker'].unique().tolist() if not df_pos.empty else ['NVDA', 'AMD', 'MSFT', 'KO', 'GLD']
+        corr_tickers = st.multiselect("Seleccionar Activos:", WATCHLIST, default=default_corr)
         
-        with col_b1:
-            # Selector de activos para la simulación
-            default_ticks = df_pos['Ticker'].unique().tolist() if not df_pos.empty else ['NVDA', 'TSLA']
-            sim_tickers = st.multiselect("Activos:", WATCHLIST, default=default_ticks)
-            
-            # Asignación de pesos automática (Equiponderada)
-            pesos = {}
-            if sim_tickers:
-                st.caption("Pesos (%) - Deben sumar 100%")
-                weight_cols = st.columns(len(sim_tickers))
-                for i, tick in enumerate(sim_tickers):
-                    default_w = 1.0 / len(sim_tickers)
-                    pesos[tick] = weight_cols[i].number_input(f"{tick}", 0.0, 1.0, default_w, step=0.05)
-            
-            periodo_sim = st.selectbox("Periodo:", ["1y", "2y", "5y", "ytd"])
-            
-            if st.button("🏗️ SIMULAR CARTERA"):
-                if sum(pesos.values()) > 1.01 or sum(pesos.values()) < 0.99:
-                    st.error("⚠️ Los pesos deben sumar 1.0 (100%)")
-                else:
-                    with st.spinner("Viajando al pasado..."):
-                        df_chart, stats = simular_cartera_historica(sim_tickers, pesos, periodo_sim)
-                        st.session_state['sim_chart'] = df_chart
-                        st.session_state['sim_stats'] = stats
-        
-        with col_b2:
-            if 'sim_chart' in st.session_state and st.session_state['sim_chart'] is not None:
-                stats = st.session_state['sim_stats']
-                
-                # Métricas Clave
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("CAGR (Anual)", f"{stats['CAGR Cartera']:.1f}%", delta=f"{stats['Alpha']:.1f}% vs SPY")
-                k2.metric("Sharpe Ratio", f"{stats['Sharpe']:.2f}", help=">1 es Bueno, >2 Excelente")
-                k3.metric("Volatilidad", f"{stats['Volatilidad']:.1f}%")
-                k4.metric("Benchmark", f"{stats['CAGR Mercado']:.1f}%")
-                
-                # Gráfico
-                fig_sim = px.line(st.session_state['sim_chart'], 
-                                  title="Crecimiento de $100 Invertidos (Base 100)", 
-                                  color_discrete_map={"Mi Cartera": "#00ff00", "Mercado (SPY)": "grey"})
-                st.plotly_chart(fig_sim, use_container_width=True)
+        if st.button("CALCULAR CORRELACIONES"):
+            if len(corr_tickers) > 1:
+                with st.spinner("Calculando relaciones estadísticas..."):
+                    matriz = calcular_matriz_correlacion(corr_tickers)
+                    
+                    if matriz is not None:
+                        # Heatmap
+                        fig_corr = px.imshow(matriz, 
+                                             text_auto=".2f", 
+                                             aspect="auto", 
+                                             color_continuous_scale="RdBu_r", # Rojo=Positivo, Azul=Negativo
+                                             zmin=-1, zmax=1,
+                                             title="Matriz de Correlación de Pearson")
+                        st.plotly_chart(fig_corr, use_container_width=True)
+                        
+                        st.info("""
+                        **Cómo leer esto:**
+                        * **Rojo Fuerte (> 0.8):** Activos gemelos. ¡Peligro! No estás diversificado.
+                        * **Azul Fuerte (< -0.5):** Cobertura. Si uno cae, el otro sube. Excelente protección.
+                        * **Gris/Blanco (~ 0):** Activos independientes.
+                        """)
+                    else: st.error("No hay datos suficientes.")
+            else: st.warning("Selecciona al menos 2 activos.")
 
+    # 2. BACKTEST CARTERA
     with sub_tabs[1]:
-        st.subheader("🧬 Grid Search RSI")
-        if st.button("🚀 Optimizar Activo"):
+        st.subheader("🏗️ Simulador")
+        sim_tickers = st.multiselect("Activos Sim:", WATCHLIST, default=default_corr)
+        pesos = {}
+        if sim_tickers:
+            cols_w = st.columns(len(sim_tickers))
+            for i, tick in enumerate(sim_tickers):
+                pesos[tick] = cols_w[i].number_input(f"{tick}", 0.0, 1.0, 1.0/len(sim_tickers), step=0.05)
+        if st.button("🏗️ SIMULAR"):
+            df_chart, stats = simular_cartera_historica(sim_tickers, pesos)
+            if df_chart is not None:
+                k1, k2, k3 = st.columns(3)
+                k1.metric("CAGR", f"{stats['CAGR Cartera']:.1f}%"); k2.metric("Sharpe", f"{stats['Sharpe']:.2f}"); k3.metric("Volatilidad", f"{stats['Volatilidad']:.1f}%")
+                st.plotly_chart(px.line(df_chart, title="Curva de Equity", color_discrete_map={"Mi Cartera": "#00ff00", "Mercado (SPY)": "grey"}), use_container_width=True)
+
+    # 3. OPTIMIZACIÓN
+    with sub_tabs[2]:
+        if st.button("🚀 Optimizar RSI"):
             r = optimizar_parametros_estrategia(sel_ticker)
-            if not r.empty:
-                try: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
-                except: st.dataframe(r)
+            if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
