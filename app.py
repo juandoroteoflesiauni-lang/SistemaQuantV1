@@ -43,16 +43,26 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V54 (Risk Manager)", layout="wide", page_icon="🔗")
+st.set_page_config(page_title="Sistema Quant V55 (Macro Strategist)", layout="wide", page_icon="🧠")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
-    .whale-alert {background-color: #4a148c; border: 1px solid #ea00ff; padding: 10px; border-radius: 5px; text-align: center; color: white; font-weight: bold;}
+    .report-box {background-color: #1e1e1e; border-left: 5px solid #FFD700; padding: 20px; border-radius: 5px; margin-bottom: 20px;}
     .stTabs [data-baseweb="tab-list"] {gap: 10px;}
     .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
     .stTabs [aria-selected="true"] {background-color: #262730;}
 </style>""", unsafe_allow_html=True)
 
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'DIA', 'GLD', 'USO']
+# TICKERS MACRO CLAVE
+MACRO_DICT = {
+    'S&P 500': 'SPY',
+    'Nasdaq 100': 'QQQ',
+    'VIX (Miedo)': '^VIX',
+    'Bonos 10Y': '^TNX',
+    'Dólar Index': 'DX-Y.NYB',
+    'Petróleo': 'CL=F',
+    'Oro': 'GC=F'
+}
 DB_NAME = "quant_database.db"
 
 # --- MOTOR SQL ---
@@ -100,20 +110,65 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE CORRELACIÓN Y RIESGO (NUEVO V54) ---
-def calcular_matriz_correlacion(tickers, periodo="1y"):
-    """Calcula la matriz de correlación de Pearson"""
+# --- MOTOR ESTRATEGA MACRO (NUEVO V55) ---
+def obtener_panorama_macro():
+    """Descarga datos de todos los indicadores macro clave"""
     try:
-        data = yf.download(" ".join(tickers), period=periodo, progress=False, auto_adjust=True)['Close']
-        if data.empty: return None
+        tickers = list(MACRO_DICT.values())
+        df = yf.download(" ".join(tickers), period="5d", progress=False, group_by='ticker', auto_adjust=True)
         
-        # Retornos logarítmicos son mejores para correlación estadística
-        log_ret = np.log(data / data.shift(1))
-        corr_matrix = log_ret.corr()
-        return corr_matrix
+        resumen = {}
+        for nombre, tick in MACRO_DICT.items():
+            try:
+                if len(tickers) > 1: serie = df[tick]['Close']
+                else: serie = df['Close']
+                
+                precio = serie.iloc[-1]
+                previo = serie.iloc[-2]
+                delta = ((precio - previo) / previo) * 100
+                
+                resumen[nombre] = {
+                    "Precio": precio,
+                    "Cambio%": delta,
+                    "Tendencia": "Alcista" if precio > serie.mean() else "Bajista"
+                }
+            except: pass
+        return resumen
     except: return None
 
-# --- MOTORES EXISTENTES (SIMULADOR, ETC) ---
+def generar_briefing_ia(datos_macro):
+    """Usa IA para redactar un informe de mercado basado en datos"""
+    try:
+        # 1. Obtener titulares globales
+        rss_url = "https://news.google.com/rss/topics/CAAqJggBCiJCAQAqSVgQASowCAAqLAgKIiZDQW1TRWdrTWFnZ0tDaElVWjI5dlozbG5hVzV6ZEdGaWJDNXpLQUFQAQ?hl=en-US&gl=US&ceid=US%3Aen" # Business News
+        feed = feedparser.parse(rss_url)
+        titulares = [entry.title for entry in feed.entries[:5]] if feed.entries else ["Sin noticias"]
+        
+        # 2. Construir Prompt con Datos Reales
+        texto_datos = "\n".join([f"{k}: {v['Precio']:.2f} ({v['Cambio%']:+.2f}%)" for k, v in datos_macro.items()])
+        
+        prompt = f"""
+        Actúa como un Estratega Jefe de Inversiones en Wall Street. Escribe un 'Morning Briefing' (Informe Matutino) en ESPAÑOL.
+        
+        DATOS DE MERCADO HOY:
+        {texto_datos}
+        
+        TITULARES CLAVE:
+        {titulares}
+        
+        Tu tarea:
+        1. Analiza la relación entre los Bonos (TNX), el VIX y el S&P 500.
+        2. Explica qué está moviendo al mercado hoy.
+        3. Da una recomendación general: ¿Es día de 'Risk On' (Apetito de riesgo) o 'Risk Off' (Cautela)?
+        
+        Formato: Usa Markdown, sé conciso, profesional y directo. Máximo 150 palabras.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e: return f"Error generando informe: {e}"
+
+# --- MOTORES EXISTENTES ---
 def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
     try:
         todos_tickers = tickers + [benchmark]
@@ -131,6 +186,12 @@ def simular_cartera_historica(tickers, pesos, periodo="1y", benchmark="SPY"):
         stats = {"CAGR Cartera": cagr_port, "CAGR Mercado": cagr_bench, "Volatilidad": vol_port, "Sharpe": sharpe, "Alpha": cagr_port - cagr_bench}
         return df_chart, stats
     except Exception as e: return None, str(e)
+
+def calcular_matriz_correlacion(tickers):
+    try:
+        d = yf.download(" ".join(tickers), period="1y", progress=False, auto_adjust=True)['Close']
+        return np.log(d/d.shift(1)).corr() if not d.empty else None
+    except: return None
 
 def detectar_actividad_ballenas(ticker):
     try:
@@ -224,9 +285,10 @@ def optimizar_parametros_estrategia(ticker):
         return pd.DataFrame(r)
     except: return pd.DataFrame()
 
-# --- INTERFAZ V54: RISK MANAGER ---
-st.title("🔗 Sistema Quant V54: Risk Manager")
+# --- INTERFAZ V55: MACRO STRATEGIST ---
+st.title("🧠 Sistema Quant V55: Macro Strategist")
 
+# DASHBOARD KPI
 df_pos = auditar_posiciones_sql()
 col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
 with col_kpi1: st.metric("Patrimonio", f"${df_pos['Valor Mercado'].sum() if not df_pos.empty else 0:,.2f}")
@@ -238,10 +300,36 @@ with col_kpi4:
 
 st.divider()
 
-main_tabs = st.tabs(["💼 MESA DE DINERO", "📊 ANÁLISIS 360", "🧬 LABORATORIO QUANT"])
+main_tabs = st.tabs(["🧠 ESTRATEGIA MACRO", "💼 MESA DE DINERO", "📊 ANÁLISIS 360", "🧬 LABORATORIO QUANT"])
 
-# --- TAB 1: OPERATIVA ---
+# --- TAB 1: ESTRATEGIA MACRO (NUEVO V55) ---
 with main_tabs[0]:
+    st.subheader("📰 Informe de Inteligencia de Mercado")
+    
+    # Obtener Datos
+    macro_data = obtener_panorama_macro()
+    
+    if macro_data:
+        # Mostrar Cintas
+        cols_macro = st.columns(len(macro_data))
+        for i, (k, v) in enumerate(macro_data.items()):
+            delta = v['Cambio%']
+            color = "normal" if k != "VIX (Miedo)" else "inverse" # VIX al revés
+            cols_macro[i].metric(k, f"{v['Precio']:,.2f}", f"{delta:+.2f}%", delta_color=color)
+        
+        st.write("---")
+        
+        # Generar Informe IA
+        if st.button("🤖 REDACTAR BRIEFING ESTRATÉGICO"):
+            with st.spinner("Analizando bonos, divisas y noticias globales..."):
+                briefing = generar_briefing_ia(macro_data)
+                st.markdown(f"<div class='report-box'><h3>🎙️ Morning Briefing (AI)</h3>{briefing}</div>", unsafe_allow_html=True)
+                st.caption("Generado por Gemini AI basándose en datos de mercado en tiempo real y noticias RSS.")
+    else:
+        st.warning("Cargando datos macroeconómicos...")
+
+# --- TAB 2: OPERATIVA ---
+with main_tabs[1]:
     c1, c2 = st.columns([2, 1])
     with c1:
         st.subheader("Cartera")
@@ -253,8 +341,8 @@ with main_tabs[0]:
             q = st.number_input("Qty", 1, 10000); p = st.number_input("Precio", 0.0)
             if st.form_submit_button("Ejecutar"): registrar_operacion_sql(t, tp, q, p); st.rerun()
 
-# --- TAB 2: ANÁLISIS ---
-with main_tabs[1]:
+# --- TAB 3: ANÁLISIS ---
+with main_tabs[2]:
     sel_ticker = st.selectbox("Analizar:", WATCHLIST)
     c_a1, c_a2 = st.columns([1, 2])
     with c_a1:
@@ -266,61 +354,23 @@ with main_tabs[1]:
         f = graficar_master(sel_ticker)
         if f: st.plotly_chart(f, use_container_width=True)
 
-# --- TAB 3: LABORATORIO (NUEVO V54) ---
-with main_tabs[2]:
+# --- TAB 4: LABORATORIO ---
+with main_tabs[3]:
     sub_tabs = st.tabs(["🔗 Matriz Correlación", "🏗️ Backtest Cartera", "🧬 Optimización"])
-    
-    # 1. MATRIZ DE CORRELACIÓN (V54)
     with sub_tabs[0]:
-        st.subheader("🔗 Mapa de Diversificación y Riesgo")
-        st.write("Analiza si tus activos se mueven juntos (Rojo) o diversificados (Azul/Gris).")
-        
-        # Selección múltiple
-        default_corr = df_pos['Ticker'].unique().tolist() if not df_pos.empty else ['NVDA', 'AMD', 'MSFT', 'KO', 'GLD']
-        corr_tickers = st.multiselect("Seleccionar Activos:", WATCHLIST, default=default_corr)
-        
+        corr_tickers = st.multiselect("Activos:", WATCHLIST, default=['NVDA', 'AMD', 'MSFT', 'KO', 'GLD'])
         if st.button("CALCULAR CORRELACIONES"):
-            if len(corr_tickers) > 1:
-                with st.spinner("Calculando relaciones estadísticas..."):
-                    matriz = calcular_matriz_correlacion(corr_tickers)
-                    
-                    if matriz is not None:
-                        # Heatmap
-                        fig_corr = px.imshow(matriz, 
-                                             text_auto=".2f", 
-                                             aspect="auto", 
-                                             color_continuous_scale="RdBu_r", # Rojo=Positivo, Azul=Negativo
-                                             zmin=-1, zmax=1,
-                                             title="Matriz de Correlación de Pearson")
-                        st.plotly_chart(fig_corr, use_container_width=True)
-                        
-                        st.info("""
-                        **Cómo leer esto:**
-                        * **Rojo Fuerte (> 0.8):** Activos gemelos. ¡Peligro! No estás diversificado.
-                        * **Azul Fuerte (< -0.5):** Cobertura. Si uno cae, el otro sube. Excelente protección.
-                        * **Gris/Blanco (~ 0):** Activos independientes.
-                        """)
-                    else: st.error("No hay datos suficientes.")
-            else: st.warning("Selecciona al menos 2 activos.")
-
-    # 2. BACKTEST CARTERA
+            matriz = calcular_matriz_correlacion(corr_tickers)
+            if matriz is not None: st.plotly_chart(px.imshow(matriz, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
     with sub_tabs[1]:
-        st.subheader("🏗️ Simulador")
-        sim_tickers = st.multiselect("Activos Sim:", WATCHLIST, default=default_corr)
-        pesos = {}
-        if sim_tickers:
-            cols_w = st.columns(len(sim_tickers))
-            for i, tick in enumerate(sim_tickers):
-                pesos[tick] = cols_w[i].number_input(f"{tick}", 0.0, 1.0, 1.0/len(sim_tickers), step=0.05)
+        sim_tickers = st.multiselect("Simular:", WATCHLIST, default=['NVDA', 'TSLA'])
         if st.button("🏗️ SIMULAR"):
-            df_chart, stats = simular_cartera_historica(sim_tickers, pesos)
-            if df_chart is not None:
-                k1, k2, k3 = st.columns(3)
-                k1.metric("CAGR", f"{stats['CAGR Cartera']:.1f}%"); k2.metric("Sharpe", f"{stats['Sharpe']:.2f}"); k3.metric("Volatilidad", f"{stats['Volatilidad']:.1f}%")
-                st.plotly_chart(px.line(df_chart, title="Curva de Equity", color_discrete_map={"Mi Cartera": "#00ff00", "Mercado (SPY)": "grey"}), use_container_width=True)
-
-    # 3. OPTIMIZACIÓN
+            pesos = {t: 1.0/len(sim_tickers) for t in sim_tickers}
+            df_ch, st_ch = simular_cartera_historica(sim_tickers, pesos)
+            if df_ch is not None:
+                st.metric("CAGR", f"{st_ch['CAGR Cartera']:.1f}%")
+                st.plotly_chart(px.line(df_ch, color_discrete_map={"Mi Cartera": "#00ff00", "Mercado (SPY)": "grey"}), use_container_width=True)
     with sub_tabs[2]:
-        if st.button("🚀 Optimizar RSI"):
+        if st.button("🚀 Optimizar"):
             r = optimizar_parametros_estrategia(sel_ticker)
             if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
