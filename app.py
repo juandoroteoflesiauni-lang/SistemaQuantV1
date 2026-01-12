@@ -44,11 +44,13 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V59 (Architect)", layout="wide", page_icon="📐")
+st.set_page_config(page_title="Sistema Quant V60 (Forensic Auditor)", layout="wide", page_icon="🔍")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
     .alert-card-high {background-color: #3d0e0e; border: 1px solid #ff4b4b; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
-    .alert-card-med {background-color: #3d3d0e; border: 1px solid #ffa500; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
+    .audit-pass {color: #00ff00; font-weight: bold; border: 1px solid #00ff00; padding: 5px; border-radius: 5px; display: inline-block;}
+    .audit-fail {color: #ff0000; font-weight: bold; border: 1px solid #ff0000; padding: 5px; border-radius: 5px; display: inline-block;}
+    .audit-warn {color: #ffa500; font-weight: bold; border: 1px solid #ffa500; padding: 5px; border-radius: 5px; display: inline-block;}
     .stTabs [data-baseweb="tab-list"] {gap: 10px;}
     .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
     .stTabs [aria-selected="true"] {background-color: #262730;}
@@ -103,84 +105,104 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR BACKTEST PRO (NUEVO V59: TP/SL) ---
-def ejecutar_backtest_custom(ticker, capital, params):
-    """Backtest flexible con Stop Loss y Take Profit"""
+# --- MOTOR CONTABLE FORENSE (NUEVO V60) ---
+@st.cache_data(ttl=3600)
+def realizar_auditoria_forense(ticker):
+    """Calcula Z-Score (Quiebra) y métricas de salud financiera"""
+    if "USD" in ticker: return None # No aplica a Crypto
+    
     try:
-        df = yf.Ticker(ticker).history(period="2y", interval="1d", auto_adjust=True)
-        if df.empty: return None
+        stock = yf.Ticker(ticker)
+        info = stock.info
         
-        # Indicadores
-        df['RSI'] = ta.rsi(df['Close'], 14)
-        df['SMA200'] = ta.sma(df['Close'], 200)
-        df['BB_Lower'] = ta.bbands(df['Close'], length=20, std=2).iloc[:, 0]
+        # Recopilación de Datos Contables (Safe Get)
+        total_assets = info.get('totalAssets', 0)
+        total_liab = info.get('totalDebt', 0) # Aprox
+        current_assets = info.get('totalCurrentAssets', 0)
+        current_liab = info.get('totalCurrentLiabilities', 0)
+        retained_earnings = info.get('retainedEarnings', total_assets * 0.1) # Fallback estimado
+        ebit = info.get('ebitda', 0) 
+        total_revenue = info.get('totalRevenue', 0)
+        market_cap = info.get('marketCap', 0)
         
-        cash = capital
-        position = 0
-        entry_price = 0
-        trade_log = []
-        equity_curve = []
+        if total_assets == 0 or total_liab == 0: return None
         
-        # Parámetros desempacados
-        rsi_buy = params.get('rsi_buy', 30)
-        use_trend = params.get('use_trend', False)
-        stop_loss_pct = params.get('sl', 0.0) / 100.0
-        take_profit_pct = params.get('tp', 0.0) / 100.0
+        # --- 1. ALTMAN Z-SCORE CALCULATION ---
+        # A = Working Capital / Total Assets
+        wk = current_assets - current_liab
+        A = wk / total_assets
         
-        for i in range(200, len(df)):
-            price = df['Close'].iloc[i]
-            date = df.index[i]
-            rsi = df['RSI'].iloc[i]
-            sma200 = df['SMA200'].iloc[i]
+        # B = Retained Earnings / Total Assets
+        B = retained_earnings / total_assets
+        
+        # C = EBIT / Total Assets
+        C = ebit / total_assets
+        
+        # D = Market Value of Equity / Total Liabilities
+        D = market_cap / total_liab
+        
+        # E = Sales / Total Assets
+        E = total_revenue / total_assets
+        
+        # Fórmula Z-Score (Manufactura Original)
+        Z = 1.2*A + 1.4*B + 3.3*C + 0.6*D + 1.0*E
+        
+        # Diagnóstico Z
+        z_status = ""
+        z_color = ""
+        if Z > 3.0: 
+            z_status = "ZONA SEGURA (Solvente)"
+            z_color = "audit-pass"
+        elif Z < 1.8: 
+            z_status = "ZONA DE PELIGRO (Riesgo Quiebra)"
+            z_color = "audit-fail"
+        else: 
+            z_status = "ZONA GRIS (Alerta)"
+            z_color = "audit-warn"
             
-            # LÓGICA DE COMPRA
-            trend_condition = (price > sma200) if use_trend else True
-            buy_signal = (rsi < rsi_buy) and trend_condition
-            
-            if position == 0 and cash > 0 and buy_signal:
-                position = cash / price
-                entry_price = price
-                cash = 0
-                trade_log.append({"Fecha": date, "Tipo": "COMPRA", "Precio": price, "Razón": "Señal"})
-            
-            # LÓGICA DE VENTA (Salida)
-            elif position > 0:
-                # 1. Stop Loss
-                if stop_loss_pct > 0 and price <= entry_price * (1 - stop_loss_pct):
-                    cash = position * price
-                    position = 0
-                    trade_log.append({"Fecha": date, "Tipo": "VENTA", "Precio": price, "Razón": "Stop Loss 🛑"})
-                
-                # 2. Take Profit
-                elif take_profit_pct > 0 and price >= entry_price * (1 + take_profit_pct):
-                    cash = position * price
-                    position = 0
-                    trade_log.append({"Fecha": date, "Tipo": "VENTA", "Precio": price, "Razón": "Take Profit 💰"})
-                
-                # 3. Salida Técnica (RSI Alto)
-                elif rsi > 70:
-                    cash = position * price
-                    position = 0
-                    trade_log.append({"Fecha": date, "Tipo": "VENTA", "Precio": price, "Razón": "RSI Alto"})
-
-            # Registro de Equity
-            val = cash if position == 0 else position * price
-            equity_curve.append({"Fecha": date, "Equity": val})
-
-        final_equity = cash if position == 0 else position * df['Close'].iloc[-1]
-        retorno = ((final_equity - capital) / capital) * 100
-        trades_count = len(trade_log)
+        # --- 2. PIOTROSKI F-SCORE (Simplificado 0-9) ---
+        # Puntos por rentabilidad, apalancamiento y eficiencia
+        f_score = 0
+        if info.get('returnOnAssets', 0) > 0: f_score += 1
+        if info.get('operatingCashflow', 0) > 0: f_score += 1
+        if info.get('currentRatio', 0) > 1: f_score += 1
+        if info.get('debtToEquity', 0) < 100: f_score += 1 # Menos deuda es mejor
         
         return {
-            "Retorno": retorno,
-            "Trades": trades_count,
-            "Log": pd.DataFrame(trade_log),
-            "Equity": pd.DataFrame(equity_curve).set_index("Fecha")
+            "Z_Score": Z,
+            "Z_Status": z_status,
+            "Z_Color": z_color,
+            "F_Score": f_score, # Sobre 4 (simplificado por datos limitados)
+            "Deuda/Patrimonio": info.get('debtToEquity', 0),
+            "Current Ratio": info.get('currentRatio', 0),
+            "ROA": info.get('returnOnAssets', 0) * 100
         }
         
     except Exception as e: return None
 
 # --- MOTORES EXISTENTES ---
+def ejecutar_backtest_custom(ticker, capital, params):
+    try:
+        df = yf.Ticker(ticker).history(period="2y", interval="1d", auto_adjust=True)
+        if df.empty: return None
+        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA200'] = ta.sma(df['Close'], 200)
+        cash = capital; position = 0; entry_price = 0; log = []; eq = []
+        rsi_buy = params.get('rsi_buy', 30); use_trend = params.get('use_trend', False)
+        sl = params.get('sl', 0.0)/100; tp = params.get('tp', 0.0)/100
+        for i in range(200, len(df)):
+            p = df['Close'].iloc[i]; d = df.index[i]; r = df['RSI'].iloc[i]; s200 = df['SMA200'].iloc[i]
+            buy_cond = (r < rsi_buy) and ((p > s200) if use_trend else True)
+            if position == 0 and cash > 0 and buy_cond:
+                position = cash/p; entry_price = p; cash = 0; log.append({"Fecha":d, "Tipo":"COMPRA", "Precio":p})
+            elif position > 0:
+                if sl > 0 and p <= entry_price*(1-sl): cash=position*p; position=0; log.append({"Fecha":d, "Tipo":"VENTA", "Precio":p, "Razón":"SL"})
+                elif tp > 0 and p >= entry_price*(1+tp): cash=position*p; position=0; log.append({"Fecha":d, "Tipo":"VENTA", "Precio":p, "Razón":"TP"})
+                elif r > 70: cash=position*p; position=0; log.append({"Fecha":d, "Tipo":"VENTA", "Precio":p, "Razón":"RSI"})
+            eq.append({"Fecha":d, "Equity": cash if position==0 else position*p})
+        final = cash if position==0 else position*df['Close'].iloc[-1]
+        return {"Retorno": ((final-capital)/capital)*100, "Trades": len(log), "Log": pd.DataFrame(log), "Equity": pd.DataFrame(eq).set_index("Fecha")}
+    except: return None
+
 @st.cache_data(ttl=600)
 def generar_feed_alertas(tickers):
     alertas = []
@@ -202,8 +224,7 @@ def generar_feed_alertas(tickers):
 def obtener_crypto_sentiment():
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1")
-        data = r.json()
-        return int(data['data'][0]['value']), data['data'][0]['value_classification']
+        data = r.json(); return int(data['data'][0]['value']), data['data'][0]['value_classification']
     except: return None, None
 
 def graficar_master(ticker):
@@ -226,25 +247,6 @@ def graficar_master(ticker):
         fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
     except: return None
 
-@st.cache_data(ttl=600)
-def generar_mapa_calor(tickers):
-    try:
-        d = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
-        p = ((d.iloc[-1]-d.iloc[-2])/d.iloc[-2])*100
-        return pd.DataFrame({'Ticker': p.index, 'Variacion': p.values, 'Sector': 'General', 'Size': d.iloc[-1].values})
-    except: return None
-
-@st.cache_data(ttl=3600)
-def calcular_valor_intrinseco(ticker):
-    try:
-        i = yf.Ticker(ticker).info; p = i.get('currentPrice') or i.get('regularMarketPreviousClose') or 0
-        e = i.get('trailingEps', 0); b = i.get('bookValue', 0)
-        if e and b and e > 0 and b > 0:
-            g = math.sqrt(22.5 * e * b); s = "INFRAVALORADA 🟢" if g > p else "SOBREVALORADA 🔴"
-            return {"Precio": p, "Graham": g, "Status_Graham": s, "Diff": ((g-p)/p)*100}
-    except: pass
-    return None
-
 def analizar_fundamental_crypto(ticker):
     try:
         df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
@@ -254,10 +256,9 @@ def analizar_fundamental_crypto(ticker):
         return {"Precio": curr, "FairValue_200SMA": fair, "Status": status}
     except: return None
 
-# --- INTERFAZ V59: STRATEGY ARCHITECT ---
-st.title("📐 Sistema Quant V59: Strategy Architect")
+# --- INTERFAZ V60: FORENSIC AUDITOR ---
+st.title("🔍 Sistema Quant V60: Forensic Auditor")
 
-# PANEL LATERAL: WATCHTOWER
 with st.sidebar:
     st.header("🔔 Watchtower")
     with st.spinner("Escaneando..."): alertas = generar_feed_alertas(WATCHLIST)
@@ -267,7 +268,6 @@ with st.sidebar:
             st.markdown(f"<div class='{c}'><b>{a['Ticker']}</b><br><small>{a['Mensaje']}</small></div>", unsafe_allow_html=True)
     else: st.success("Mercado tranquilo.")
 
-# DASHBOARD KPI
 df_pos = auditar_posiciones_sql()
 k1, k2, k3, k4 = st.columns(4)
 with k1: st.metric("Patrimonio", f"${df_pos['Valor Mercado'].sum() if not df_pos.empty else 0:,.2f}")
@@ -279,101 +279,75 @@ with k4:
 
 st.divider()
 
-main_tabs = st.tabs(["🧬 LABORATORIO QUANT", "📊 ANÁLISIS HÍBRIDO", "💼 MESA DE DINERO"])
+main_tabs = st.tabs(["🔍 AUDITORÍA FORENSE", "🧬 LABORATORIO QUANT", "💼 MESA DE DINERO"])
 
-# --- TAB 1: LABORATORIO (NUEVO V59: BACKTEST BUILDER) ---
+# --- TAB 1: AUDITORÍA FORENSE (NUEVO V60) ---
 with main_tabs[0]:
-    col_l1, col_l2 = st.columns([1, 2])
+    sel_ticker = st.selectbox("Auditar Activo:", WATCHLIST, key="aud_tick")
+    ES_CRYPTO = "USD" in sel_ticker and "BTC" in sel_ticker or "ETH" in sel_ticker
     
-    with col_l1:
-        st.subheader("🛠️ Constructor de Estrategias")
-        st.info("Diseña tu algoritmo y pruébalo en el pasado.")
-        
-        # 1. Selector de Activo
-        tk_back = st.selectbox("1. Activo a Probar:", WATCHLIST)
-        
-        # 2. Configuración de Entrada
-        st.markdown("**2. Reglas de Entrada (Compra)**")
-        rsi_trigger = st.slider("Comprar si RSI <", 10, 50, 30)
-        filter_trend = st.checkbox("Filtro de Tendencia (Solo comprar si Precio > SMA 200)", value=True)
-        
-        # 3. Configuración de Salida (Gestión de Riesgo)
-        st.markdown("**3. Gestión de Salida (Venta)**")
-        sl_input = st.number_input("Stop Loss (%)", 0.0, 20.0, 5.0, help="0 para desactivar")
-        tp_input = st.number_input("Take Profit (%)", 0.0, 50.0, 15.0, help="0 para desactivar")
-        
-        if st.button("🚀 EJECUTAR BACKTEST"):
-            params = {
-                "rsi_buy": rsi_trigger,
-                "use_trend": filter_trend,
-                "sl": sl_input,
-                "tp": tp_input
-            }
-            with st.spinner("Simulando operaciones..."):
-                res_bt = ejecutar_backtest_custom(tk_back, 10000, params)
-                st.session_state['res_bt'] = res_bt
-
-    with col_l2:
-        if 'res_bt' in st.session_state and st.session_state['res_bt']:
-            res = st.session_state['res_bt']
-            
-            # KPI Resultados
-            kb1, kb2, kb3 = st.columns(3)
-            kb1.metric("Retorno Total", f"{res['Retorno']:.2f}%", help="Beneficio neto en el periodo")
-            kb2.metric("Nº Trades", f"{res['Trades']}")
-            kb3.metric("Resultado Final", f"${10000 * (1 + res['Retorno']/100):,.2f}")
-            
-            # Curva de Equity
-            if not res['Equity'].empty:
-                st.plotly_chart(px.line(res['Equity'], y="Equity", title="Crecimiento de la Cuenta ($10,000 Iniciales)"), use_container_width=True)
-            
-            # Log de Operaciones
-            with st.expander("📜 Ver Registro de Operaciones (Trade Log)"):
-                if not res['Log'].empty:
-                    st.dataframe(res['Log'])
-                else:
-                    st.warning("No se ejecutaron operaciones con estas reglas.")
-        else:
-            st.info("Configura los parámetros a la izquierda y pulsa 'Ejecutar'.")
-
-# --- TAB 2: ANÁLISIS HÍBRIDO ---
-with main_tabs[1]:
-    sel_ticker = st.selectbox("Analizar:", WATCHLIST, key="ana_tick")
-    ES_CRYPTO = "USD" in sel_ticker and "BTC" in sel_ticker or "ETH" in sel_ticker or "SOL" in sel_ticker
+    col_audit1, col_audit2 = st.columns([1, 2])
     
-    c_a1, c_a2 = st.columns([1, 2])
-    with c_a1:
+    with col_audit1:
+        st.write("---")
         if ES_CRYPTO:
-            st.markdown(f"### 🪙 Cripto: {sel_ticker}")
+            st.info("⚠️ El análisis forense contable (Z-Score) no aplica a Criptomonedas (no tienen Balance Sheet).")
+            # Fallback a Crypto Analysis
             cry_data = analizar_fundamental_crypto(sel_ticker)
             if cry_data:
                 st.metric("Precio", f"${cry_data['Precio']:,.2f}")
-                st.metric("Fair Value (SMA200)", f"${cry_data['FairValue_200SMA']:,.2f}")
+                st.metric("Trend Secular", f"${cry_data['FairValue_200SMA']:,.2f}")
                 st.info(cry_data['Status'])
         else:
-            st.markdown(f"### 🏢 Acciones: {sel_ticker}")
-            fund = calcular_valor_intrinseco(sel_ticker)
-            if fund:
-                st.metric("Valor Graham", f"${fund['Graham']:.2f}", f"{fund['Diff']:.1f}%")
-                if "INFRA" in fund['Status_Graham']: st.success("✅ Value Investing")
-                else: st.error("❌ Growth Premium")
-    
-    with c_a2:
+            # AUDITORÍA DE ACCIONES (V60)
+            st.markdown(f"### 📋 Informe Contable: {sel_ticker}")
+            audit = realizar_auditoria_forense(sel_ticker)
+            
+            if audit:
+                # 1. Z-SCORE
+                st.markdown("#### 1. Solvencia (Altman Z-Score)")
+                st.markdown(f"<div class='{audit['Z_Color']}'>{audit['Z_Score']:.2f} | {audit['Z_Status']}</div>", unsafe_allow_html=True)
+                st.caption("Predice riesgo de quiebra en 2 años. (>3.0 es seguro)")
+                
+                st.divider()
+                
+                # 2. RADIOGRAFÍA FINANCIERA
+                st.markdown("#### 2. Ratios Clave")
+                m1, m2 = st.columns(2)
+                m1.metric("Deuda/Patrimonio", f"{audit['Deuda/Patrimonio']:.2f}", help="Menos es mejor. >200 es alto riesgo.")
+                m2.metric("Current Ratio", f"{audit['Current Ratio']:.2f}", help="Liquidez corto plazo. >1.5 es ideal.")
+                st.metric("ROA (Rentabilidad Activos)", f"{audit['ROA']:.2f}%")
+                
+            else:
+                st.warning("Datos contables insuficientes para este activo.")
+
+    with col_audit2:
         f = graficar_master(sel_ticker)
         if f: st.plotly_chart(f, use_container_width=True)
-        
-        with st.expander("Mapa de Mercado"):
-            df_map = generar_mapa_calor(WATCHLIST)
-            if df_map is not None: st.plotly_chart(px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0), use_container_width=True)
+
+# --- TAB 2: LABORATORIO ---
+with main_tabs[1]:
+    st.subheader("🛠️ Constructor de Estrategias")
+    tk_back = st.selectbox("Activo:", WATCHLIST, key="bt_tk")
+    rsi_trigger = st.slider("RSI Compra <", 10, 50, 30)
+    filter_trend = st.checkbox("Filtro Tendencia (SMA200)", True)
+    sl_input = st.number_input("Stop Loss %", 0.0, 20.0, 5.0)
+    tp_input = st.number_input("Take Profit %", 0.0, 50.0, 15.0)
+    
+    if st.button("🚀 EJECUTAR BACKTEST"):
+        p = {"rsi_buy": rsi_trigger, "use_trend": filter_trend, "sl": sl_input, "tp": tp_input}
+        res = ejecutar_backtest_custom(tk_back, 10000, p)
+        if res:
+            c1, c2 = st.columns(2)
+            c1.metric("Retorno", f"{res['Retorno']:.2f}%")
+            c2.metric("Trades", res['Trades'])
+            st.plotly_chart(px.line(res['Equity'], y="Equity"), use_container_width=True)
 
 # --- TAB 3: OPERATIVA ---
 with main_tabs[2]:
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        if not df_pos.empty: st.dataframe(df_pos.style.format({"Valor Mercado": "${:.2f}", "P&L ($)": "${:+.2f}"}).background_gradient(subset=['P&L (%)'], cmap='RdYlGn'), use_container_width=True)
-        else: st.info("Cartera vacía.")
-    with c2:
-        with st.form("op"):
-            t = st.selectbox("Ticker", WATCHLIST, key="op_tk"); tp = st.selectbox("Tipo", ["COMPRA", "VENTA"])
-            q = st.number_input("Qty", 1, 10000); p = st.number_input("Precio", 0.0)
-            if st.form_submit_button("Ejecutar"): registrar_operacion_sql(t, tp, q, p); st.rerun()
+    if not df_pos.empty: st.dataframe(df_pos)
+    else: st.info("Cartera vacía.")
+    with st.form("op"):
+        t = st.selectbox("Ticker", WATCHLIST, key="op_tk2"); tp = st.selectbox("Tipo", ["COMPRA", "VENTA"])
+        q = st.number_input("Qty", 1, 10000); pr = st.number_input("Precio", 0.0)
+        if st.form_submit_button("Ejecutar"): registrar_operacion_sql(t, tp, q, pr); st.rerun()
