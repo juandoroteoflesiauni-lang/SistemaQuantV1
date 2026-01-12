@@ -14,11 +14,23 @@ import math
 import feedparser 
 import requests 
 from datetime import datetime
+from scipy.signal import argrelextrema 
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 from scipy.optimize import minimize 
 from scipy.stats import norm 
 import google.generativeai as genai
+from fpdf import FPDF 
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN E INICIOS ---
+try:
+    from pypfopt import EfficientFrontier, risk_models, expected_returns
+    from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
+    HAVE_PYPFOPT = True
+except ImportError:
+    HAVE_PYPFOPT = False
+
 warnings.filterwarnings('ignore')
 
 try:
@@ -32,10 +44,10 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V61 (The Optimizer)", layout="wide", page_icon="📉")
+st.set_page_config(page_title="Sistema Quant V62 (The Valuator)", layout="wide", page_icon="🧮")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
-    .opt-card {background-color: #112b1b; border: 1px solid #00cc96; padding: 15px; border-radius: 8px;}
+    .dcf-card {background-color: #1a2634; border: 1px solid #3d5a80; padding: 15px; border-radius: 8px;}
     .stTabs [data-baseweb="tab-list"] {gap: 10px;}
     .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
     .stTabs [aria-selected="true"] {background-color: #262730;}
@@ -89,103 +101,127 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR MARKOWITZ (NUEVO V61) ---
-def simular_frontera_eficiente(tickers, num_simulaciones=2000):
-    """Genera miles de portafolios aleatorios para encontrar la frontera eficiente"""
+# --- MOTOR DE VALUACIÓN DCF (NUEVO V62) ---
+def calcular_modelo_dcf(ticker, tasa_crecimiento, wacc, tasa_terminal, años=5):
+    """Calcula el Valor Intrínseco usando Discounted Cash Flow"""
     try:
-        # 1. Datos
-        data = yf.download(" ".join(tickers), period="1y", progress=False, auto_adjust=True)['Close']
-        if data.empty: return None, None
+        stock = yf.Ticker(ticker)
+        info = stock.info
         
-        # Retornos logarítmicos
-        log_ret = np.log(data / data.shift(1))
+        # 1. Obtener Free Cash Flow (FCF) Base
+        fcf = info.get('freeCashflow')
         
-        # Matrices para guardar resultados
-        all_weights = np.zeros((num_simulaciones, len(tickers)))
-        ret_arr = np.zeros(num_simulaciones)
-        vol_arr = np.zeros(num_simulaciones)
-        sharpe_arr = np.zeros(num_simulaciones)
-        
-        # 2. Simulación Monte Carlo
-        for ind in range(num_simulaciones):
-            # Pesos aleatorios
-            weights = np.array(np.random.random(len(tickers)))
-            weights = weights / np.sum(weights) # Normalizar para que sumen 1
-            all_weights[ind, :] = weights
+        # Si no hay dato directo, estimamos: Operating Cash Flow - CapEx
+        if fcf is None:
+            ocf = info.get('operatingCashflow', 0)
+            # CapEx suele no estar en 'info' directo a veces, asumimos un % o 0 si falla
+            fcf = ocf * 0.8 # Estimación grosera si falta dato exacto
             
-            # Retorno Esperado
-            ret_arr[ind] = np.sum(log_ret.mean() * weights) * 252
-            
-            # Volatilidad Esperada
-            vol_arr[ind] = np.sqrt(np.dot(weights.T, np.dot(log_ret.cov() * 252, weights)))
-            
-            # Sharpe Ratio (Asumiendo tasa libre de riesgo = 0 para simplificar)
-            sharpe_arr[ind] = ret_arr[ind] / vol_arr[ind]
-            
-        # 3. Encontrar el mejor portafolio (Max Sharpe)
-        max_sharpe_idx = sharpe_arr.argmax()
-        best_ret = ret_arr[max_sharpe_idx]
-        best_vol = vol_arr[max_sharpe_idx]
-        best_weights = all_weights[max_sharpe_idx, :]
+        if fcf <= 0: return None # No se puede valorar por DCF si no genera caja
         
-        # DataFrame para graficar
-        sim_data = pd.DataFrame({
-            'Retorno': ret_arr, 
-            'Volatilidad': vol_arr, 
-            'Sharpe': sharpe_arr
-        })
+        shares = info.get('sharesOutstanding', 1)
+        net_debt = info.get('totalDebt', 0) - info.get('totalCash', 0)
         
-        # Diccionario de pesos óptimos
-        best_weights_dict = {tickers[i]: best_weights[i] for i in range(len(tickers))}
+        # 2. Proyectar FCF Futuros
+        fcf_proyectados = []
+        fcf_actual = fcf
         
-        return sim_data, {
-            "Max_Ret": best_ret,
-            "Max_Vol": best_vol,
-            "Max_Sharpe": sharpe_arr.max(),
-            "Pesos": best_weights_dict
+        for i in range(1, años + 1):
+            fcf_actual = fcf_actual * (1 + tasa_crecimiento)
+            fcf_proyectados.append(fcf_actual)
+            
+        # 3. Calcular Valor Terminal (Perpetuidad)
+        # TV = (FCF_Final * (1 + g_terminal)) / (WACC - g_terminal)
+        fcf_final = fcf_proyectados[-1]
+        terminal_value = (fcf_final * (1 + tasa_terminal)) / (wacc - tasa_terminal)
+        
+        # 4. Descontar a Valor Presente (PV)
+        pv_fcf = 0
+        for i, val in enumerate(fcf_proyectados):
+            pv_fcf += val / ((1 + wacc) ** (i + 1))
+            
+        pv_terminal = terminal_value / ((1 + wacc) ** años)
+        
+        enterprise_value = pv_fcf + pv_terminal
+        equity_value = enterprise_value - net_debt
+        fair_value_share = equity_value / shares
+        
+        # Generar Tabla de Sensibilidad
+        sensibilidad = []
+        growth_ranges = [tasa_crecimiento - 0.02, tasa_crecimiento, tasa_crecimiento + 0.02]
+        wacc_ranges = [wacc - 0.01, wacc, wacc + 0.01]
+        
+        for g in growth_ranges:
+            row = []
+            for w in wacc_ranges:
+                # Calculo rápido para la matriz
+                fcf_iter = fcf
+                pv_iter = 0
+                for i in range(1, años + 1):
+                    fcf_iter *= (1 + g)
+                    pv_iter += fcf_iter / ((1 + w) ** i)
+                tv_iter = (fcf_iter * (1 + tasa_terminal)) / (w - tasa_terminal)
+                pv_tv_iter = tv_iter / ((1 + w) ** años)
+                val_iter = (pv_iter + pv_tv_iter - net_debt) / shares
+                row.append(val_iter)
+            sensibilidad.append(row)
+            
+        return {
+            "Fair Value": fair_value_share,
+            "FCF Base": fcf,
+            "Enterprise Value": enterprise_value,
+            "Equity Value": equity_value,
+            "Sensibilidad": sensibilidad,
+            "Ejes": {"Growth": growth_ranges, "WACC": wacc_ranges}
         }
         
-    except Exception as e: return None, str(e)
+    except Exception as e: return None
 
-# --- MOTORES EXISTENTES (FORENSIC, CRYPTO, ETC) ---
-@st.cache_data(ttl=3600)
-def realizar_auditoria_forense(ticker):
-    if "USD" in ticker: return None
+# --- MOTORES EXISTENTES ---
+@st.cache_data(ttl=600)
+def calcular_score_quant(ticker):
+    score=0; b={"Técnico":0, "Fundamental":0, "Riesgo":0}
     try:
-        info = yf.Ticker(ticker).info
-        total_assets = info.get('totalAssets', 0); total_liab = info.get('totalDebt', 0)
-        current_assets = info.get('totalCurrentAssets', 0); current_liab = info.get('totalCurrentLiabilities', 0)
-        retained_earnings = info.get('retainedEarnings', total_assets * 0.1); ebit = info.get('ebitda', 0)
-        total_revenue = info.get('totalRevenue', 0); market_cap = info.get('marketCap', 0)
-        if total_assets == 0 or total_liab == 0: return None
-        A = (current_assets - current_liab) / total_assets; B = retained_earnings / total_assets
-        C = ebit / total_assets; D = market_cap / total_liab; E = total_revenue / total_assets
-        Z = 1.2*A + 1.4*B + 3.3*C + 0.6*D + 1.0*E
-        z_status = "ZONA SEGURA" if Z > 3.0 else "ZONA QUIEBRA" if Z < 1.8 else "ALERTA"
-        z_color = "audit-pass" if Z > 3.0 else "audit-fail" if Z < 1.8 else "audit-warn"
-        return {"Z_Score": Z, "Z_Status": z_status, "Z_Color": z_color, "Deuda": info.get('debtToEquity', 0)}
-    except: return None
+        h = yf.Ticker(ticker).history(period="6mo", interval="1d", auto_adjust=True)
+        if not h.empty:
+            h['RSI']=ta.rsi(h['Close'],14); h['SMA']=ta.sma(h['Close'],50)
+            if 30<=h['RSI'].iloc[-1]<=65: b['Técnico']+=20
+            elif h['RSI'].iloc[-1]<30: b['Técnico']+=15
+            else: b['Técnico']+=5
+            if h['Close'].iloc[-1]>h['SMA'].iloc[-1]: b['Técnico']+=20
+        i = yf.Ticker(ticker).info
+        if i.get('trailingEps'): b['Fundamental']+=20
+        if "USD" in ticker: b['Fundamental']=20
+        be = i.get('beta',1.0) or 1.0
+        if 0.8<=be<=1.2: b['Riesgo']+=20
+        elif be<0.8: b['Riesgo']+=15
+        else: b['Riesgo']+=10
+        score = sum(b.values())
+        return score, b
+    except: return 0, b
 
-def analizar_fundamental_crypto(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
-        if df.empty: return None
-        fair = df['Close'].rolling(200).mean().iloc[-1]; curr = df['Close'].iloc[-1]
-        status = "SOBRECOMPRADO 🔴" if curr > fair * 1.5 else "ACUMULACIÓN 🟢" if curr < fair else "NEUTRAL 🟡"
-        return {"Precio": curr, "FairValue": fair, "Status": status}
-    except: return None
+def dibujar_velocimetro(score):
+    return go.Figure(go.Indicator(mode="gauge+number", value=score, domain={'x': [0, 1], 'y': [0, 1]}, gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "white"}, 'steps': [{'range': [0, 40], 'color': "#ff4b4b"}, {'range': [40, 70], 'color': "#ffa500"}, {'range': [70, 100], 'color': "#00cc96"}]})).update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), paper_bgcolor="#0e1117", font={'color': "white"})
 
 def graficar_master(ticker):
     try:
         df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
         if df.empty: return None
-        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA200'] = ta.sma(df['Close'], 200)
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
+        df['VWAP'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA200'], line=dict(color='yellow'), name="SMA200"), row=1, col=1)
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=2), name="VWAP"), row=1, col=1)
+        if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA"), row=1, col=1)
+        try: 
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
+        except: pass
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name="RSI"), row=2, col=1)
         fig.add_hline(y=70, line_color="red", row=2, col=1); fig.add_hline(y=30, line_color="green", row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False); return fig
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
     except: return None
 
 @st.cache_data(ttl=600)
@@ -203,15 +239,15 @@ def generar_feed_alertas(tickers):
         except: pass
     return alertas
 
-# --- INTERFAZ V61: THE OPTIMIZER ---
-st.title("📉 Sistema Quant V61: The Optimizer")
+# --- INTERFAZ V62: THE VALUATOR ---
+st.title("🧮 Sistema Quant V62: The Valuator")
 
 with st.sidebar:
     st.header("🔔 Watchtower")
     alertas = generar_feed_alertas(WATCHLIST)
     if alertas:
         for a in alertas: st.markdown(f"<div class='alert-card-high'><b>{a['Ticker']}</b><br><small>{a['Mensaje']}</small></div>", unsafe_allow_html=True)
-    else: st.success("Sin alertas críticas.")
+    else: st.success("Sin alertas.")
 
 df_pos = auditar_posiciones_sql()
 k1, k2, k3, k4 = st.columns(4)
@@ -222,94 +258,73 @@ with k4: st.metric("Bitcoin", f"${yf.Ticker('BTC-USD').history(period='1d')['Clo
 
 st.divider()
 
-main_tabs = st.tabs(["📉 OPTIMIZACIÓN (MARKOWITZ)", "🔍 AUDITORÍA & CRIPTO", "💼 MESA DE DINERO"])
+main_tabs = st.tabs(["🧮 MODELO DCF", "📊 ANÁLISIS TÉCNICO", "💼 MESA DE DINERO"])
 
-# --- TAB 1: OPTIMIZACIÓN DE PORTAFOLIO (V61) ---
+# --- TAB 1: VALUACIÓN DCF (V62) ---
 with main_tabs[0]:
-    st.subheader("📉 Frontera Eficiente de Markowitz")
-    st.info("Descubre la combinación matemática perfecta de activos para maximizar ganancias y minimizar riesgo.")
+    col_d1, col_d2 = st.columns([1, 2])
     
-    col_opt1, col_opt2 = st.columns([1, 2])
-    
-    with col_opt1:
-        # Selector de activos
-        default_opts = ['NVDA', 'TSLA', 'AAPL', 'KO', 'GLD']
-        opt_tickers = st.multiselect("Seleccionar Activos (Mínimo 3):", WATCHLIST, default=default_opts)
+    with col_d1:
+        st.subheader("Configuración del Modelo")
+        sel_dcf = st.selectbox("Activo a Valorar:", WATCHLIST)
         
-        if st.button("🚀 CALCULAR FRONTERA EFICIENTE"):
-            if len(opt_tickers) < 3:
-                st.error("Por favor selecciona al menos 3 activos para diversificar.")
-            else:
-                with st.spinner(f"Simulando 2,000 portafolios posibles con {', '.join(opt_tickers)}..."):
-                    sim_data, best_port = simular_frontera_eficiente(opt_tickers)
-                    
-                    if sim_data is not None:
-                        st.session_state['sim_data'] = sim_data
-                        st.session_state['best_port'] = best_port
-                    else:
-                        st.error("Error al descargar datos.")
+        # Parámetros Financieros (Ajustables por el Contador)
+        st.markdown("#### Supuestos Financieros")
+        growth_rate = st.slider("Crecimiento Esperado (5 años)", 0.01, 0.30, 0.10, 0.01, format="%.2f")
+        wacc = st.slider("WACC (Costo de Capital)", 0.05, 0.15, 0.09, 0.005, format="%.3f")
+        terminal_growth = st.slider("Crecimiento Terminal (Perpetuidad)", 0.01, 0.05, 0.025, 0.005, format="%.3f")
+        
+        if st.button("🧮 CALCULAR VALOR INTRÍNSECO"):
+            with st.spinner("Proyectando flujos de caja a perpetuidad..."):
+                dcf_result = calcular_modelo_dcf(sel_dcf, growth_rate, wacc, terminal_growth)
+                st.session_state['dcf'] = dcf_result
 
-    with col_opt2:
-        if 'sim_data' in st.session_state:
-            sim_data = st.session_state['sim_data']
-            best_port = st.session_state['best_port']
+    with col_d2:
+        if 'dcf' in st.session_state and st.session_state['dcf']:
+            res = st.session_state['dcf']
+            current_px = float(yf.Ticker(sel_dcf).history(period="1d")['Close'].iloc[-1])
             
-            # 1. Gráfico de Dispersión
-            fig_frontier = px.scatter(sim_data, x="Volatilidad", y="Retorno", color="Sharpe",
-                                      title="Frontera Eficiente (Cada punto es un portafolio)",
-                                      color_continuous_scale="Viridis")
+            # Tarjeta Principal
+            upside = ((res['Fair Value'] - current_px) / current_px) * 100
+            color_val = "green" if upside > 0 else "red"
             
-            # Marcar el mejor
-            fig_frontier.add_trace(go.Scatter(x=[best_port['Max_Vol']], y=[best_port['Max_Ret']],
-                                              mode='markers', marker=dict(color='red', size=15, symbol='star'),
-                                              name="Portafolio Óptimo"))
-            st.plotly_chart(fig_frontier, use_container_width=True)
+            st.markdown(f"""
+            <div class='dcf-card' style='text-align: center;'>
+                <h2>Valor Justo (Fair Value): ${res['Fair Value']:.2f}</h2>
+                <h3 style='color: {color_val};'>Upside/Downside: {upside:+.2f}%</h3>
+                <p>Precio Actual: ${current_px:.2f} | Enterprise Value: ${res['Enterprise Value']/1e9:.2f}B</p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # 2. Pesos Óptimos
-            st.markdown("### 🏆 Composición del Portafolio Óptimo (Max Sharpe)")
+            st.write("---")
             
-            # Mostrar como tabla y gráfico de torta
-            df_pesos = pd.DataFrame(list(best_port['Pesos'].items()), columns=['Activo', 'Peso'])
-            df_pesos['Peso %'] = (df_pesos['Peso'] * 100).round(2)
+            # Matriz de Sensibilidad
+            st.markdown("#### 🌡️ Análisis de Sensibilidad (Precio Justo según escenarios)")
             
-            c_p1, c_p2 = st.columns(2)
-            with c_p1:
-                st.markdown(f"""
-                <div class='opt-card'>
-                    <h3>Rendimiento Esperado: {best_port['Max_Ret']*100:.1f}%</h3>
-                    <h3>Riesgo (Volatilidad): {best_port['Max_Vol']*100:.1f}%</h3>
-                    <h3>Ratio Sharpe: {best_port['Max_Sharpe']:.2f}</h3>
-                </div>
-                """, unsafe_allow_html=True)
+            # Crear DataFrame para el Heatmap
+            df_sens = pd.DataFrame(
+                res['Sensibilidad'], 
+                index=[f"G: {g:.1%}" for g in res['Ejes']['Growth']],
+                columns=[f"WACC: {w:.1%}" for w in res['Ejes']['WACC']]
+            )
             
-            with c_p2:
-                fig_pie = px.pie(df_pesos, values='Peso', names='Activo', title="Distribución Ideal de Capital")
-                st.plotly_chart(fig_pie, use_container_width=True)
-
-# --- TAB 2: AUDITORÍA & CRIPTO ---
-with main_tabs[1]:
-    sel_ticker = st.selectbox("Analizar:", WATCHLIST)
-    ES_CRYPTO = "USD" in sel_ticker and "BTC" in sel_ticker or "ETH" in sel_ticker or "SOL" in sel_ticker
-    
-    c_a1, c_a2 = st.columns([1, 2])
-    with c_a1:
-        if ES_CRYPTO:
-            st.markdown(f"### 🪙 Cripto: {sel_ticker}")
-            cry_data = analizar_fundamental_crypto(sel_ticker)
-            if cry_data:
-                st.metric("Precio", f"${cry_data['Precio']:,.2f}")
-                st.metric("Fair Value", f"${cry_data['FairValue']:,.2f}")
-                st.info(cry_data['Status'])
+            fig_heat = px.imshow(df_sens, text_auto=".2f", aspect="auto", 
+                                 color_continuous_scale="RdYlGn",
+                                 title="Matriz: Crecimiento (Eje Y) vs WACC (Eje X)")
+            st.plotly_chart(fig_heat, use_container_width=True)
+            
         else:
-            st.markdown(f"### 🔍 Auditoría: {sel_ticker}")
-            audit = realizar_auditoria_forense(sel_ticker)
-            if audit:
-                st.markdown(f"**Altman Z-Score:** {audit['Z_Score']:.2f}")
-                st.markdown(f"<div class='{audit['Z_Color']}'>{audit['Z_Status']}</div>", unsafe_allow_html=True)
-                st.metric("Deuda/Patrimonio", f"{audit['Deuda']:.2f}")
-            else: st.warning("Sin datos contables.")
-    with c_a2:
-        f = graficar_master(sel_ticker)
+            st.info("Selecciona un activo y pulsa Calcular. (Nota: DCF no funciona bien para Criptos o empresas con pérdidas).")
+
+# --- TAB 2: ANÁLISIS TÉCNICO ---
+with main_tabs[1]:
+    sel_tech = st.selectbox("Gráfico:", WATCHLIST, key="tech_sel")
+    c_t1, c_t2 = st.columns([1, 2])
+    with c_t1:
+        s, b = calcular_score_quant(sel_tech)
+        st.plotly_chart(dibujar_velocimetro(s), use_container_width=True)
+    with c_t2:
+        f = graficar_master(sel_tech)
         if f: st.plotly_chart(f, use_container_width=True)
 
 # --- TAB 3: OPERATIVA ---
