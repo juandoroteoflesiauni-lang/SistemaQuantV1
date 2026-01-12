@@ -373,4 +373,4 @@ with main_tabs[3]:
     with sub_tabs[2]:
         if st.button("🚀 Optimizar"):
             r = optimizar_parametros_estrategia(sel_ticker)
-            if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True)
+            if not r.empty: st.plotly_chart(px.density_heatmap(r, x="Compra <", y="Venta >", z="Retorno %", text_auto=".1f", color_continuous_scale="Viridis"), use_container_width=True) 
