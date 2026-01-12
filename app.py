@@ -43,10 +43,10 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-st.set_page_config(page_title="Sistema Quant V51 (The Judge)", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="Sistema Quant V52 (Whale Tracker)", layout="wide", page_icon="🐋")
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 8px; padding: 15px; text-align: center;}
-    .score-card {background-color: #1c1c1c; border: 2px solid #4CAF50; border-radius: 10px; padding: 20px; text-align: center;}
+    .whale-alert {background-color: #4a148c; border: 1px solid #ea00ff; padding: 10px; border-radius: 5px; text-align: center; color: white; font-weight: bold;}
     .stTabs [data-baseweb="tab-list"] {gap: 10px;}
     .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #0e1117; border-radius: 5px;}
     .stTabs [aria-selected="true"] {background-color: #262730;}
@@ -100,93 +100,132 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE SCORING (THE JUDGE V51) ---
+# --- MOTORES DE ANÁLISIS ---
+def detectar_actividad_ballenas(ticker):
+    """Detecta volumen inusual y posición respecto al VWAP"""
+    try:
+        df = yf.Ticker(ticker).history(period="1mo", interval="1d", auto_adjust=True)
+        if df.empty: return None
+        
+        # Calcular VWAP (Volume Weighted Average Price)
+        # Formula manual simple para pandas nativo: Cumsum(Price * Vol) / Cumsum(Vol)
+        df['VWAP'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+        
+        # Promedio de Volumen (20 días)
+        df['VolSMA'] = df['Volume'].rolling(20).mean()
+        
+        last_vol = df['Volume'].iloc[-1]
+        last_avg = df['VolSMA'].iloc[-1]
+        last_close = df['Close'].iloc[-1]
+        last_vwap = df['VWAP'].iloc[-1]
+        
+        alerta = None
+        # Si el volumen de hoy es > 150% del promedio
+        if last_vol > last_avg * 1.5:
+            alerta = "🐋 ALERTA BALLENA: Volumen Inusual"
+            
+        trend = "ALCISTA (Institucional)" if last_close > last_vwap else "BAJISTA (Institucional)"
+        
+        return {
+            "Volumen Hoy": last_vol,
+            "Volumen Promedio": last_avg,
+            "Ratio Vol": last_vol / last_avg,
+            "Alerta": alerta,
+            "VWAP": last_vwap,
+            "Tendencia": trend
+        }
+    except: return None
+
 @st.cache_data(ttl=600)
 def calcular_score_quant(ticker):
-    """Calcula una nota del 0 al 100 para el activo"""
-    score = 0
-    breakdown = {"Técnico": 0, "Fundamental": 0, "Riesgo": 0}
-    
+    score = 0; breakdown = {"Técnico": 0, "Fundamental": 0, "Riesgo": 0}
     try:
-        # 1. DATOS TÉCNICOS (40 pts)
         df = yf.Ticker(ticker).history(period="6mo", interval="1d", auto_adjust=True)
         if not df.empty:
-            df['RSI'] = ta.rsi(df['Close'], 14)
-            df['SMA50'] = ta.sma(df['Close'], 50)
-            
-            last_rsi = df['RSI'].iloc[-1]
-            last_price = df['Close'].iloc[-1]
-            last_sma = df['SMA50'].iloc[-1]
-            
-            # RSI Score (0-20 pts)
-            if 30 <= last_rsi <= 65: breakdown['Técnico'] += 20 # Zona saludable
-            elif last_rsi < 30: breakdown['Técnico'] += 15 # Rebote probable (pero riesgoso)
-            elif last_rsi > 70: breakdown['Técnico'] += 5 # Sobrecompra (peligro)
-            
-            # Tendencia Score (0-20 pts)
-            if last_price > last_sma: breakdown['Técnico'] += 20 # Tendencia alcista
-            else: breakdown['Técnico'] += 0 # Tendencia bajista
-            
-        # 2. DATOS FUNDAMENTALES (40 pts)
+            df['RSI'] = ta.rsi(df['Close'], 14); df['SMA50'] = ta.sma(df['Close'], 50)
+            if 30 <= df['RSI'].iloc[-1] <= 65: breakdown['Técnico'] += 20
+            elif df['RSI'].iloc[-1] < 30: breakdown['Técnico'] += 15
+            elif df['RSI'].iloc[-1] > 70: breakdown['Técnico'] += 5
+            if df['Close'].iloc[-1] > df['SMA50'].iloc[-1]: breakdown['Técnico'] += 20
         info = yf.Ticker(ticker).info
-        eps = info.get('trailingEps', 0)
-        pe = info.get('trailingPE', 0)
-        book = info.get('bookValue', 0)
-        price = info.get('currentPrice', df['Close'].iloc[-1])
-        
-        # Graham Score (0-20 pts)
-        if eps and book and eps > 0 and book > 0:
-            graham = math.sqrt(22.5 * eps * book)
-            if price < graham: breakdown['Fundamental'] += 20 # Subvaluada
-            elif price < graham * 1.2: breakdown['Fundamental'] += 10 # Precio justo
-            else: breakdown['Fundamental'] += 0 # Cara
-            
-        # Rentabilidad Score (0-20 pts)
-        if eps > 0: breakdown['Fundamental'] += 20 # Empresa rentable
-        
-        # Caso Crypto/ETF (Sin fundamentales clásicos)
-        if not eps and "USD" in ticker: # Ajuste para Crypto
-             breakdown['Fundamental'] = 20 # Asumimos neutral
-             
-        # 3. RIESGO (20 pts)
+        eps = info.get('trailingEps', 0); book = info.get('bookValue', 0); price = info.get('currentPrice', 0)
+        if eps and book and eps>0 and book>0:
+            g = math.sqrt(22.5 * eps * book)
+            if price < g: breakdown['Fundamental'] += 20
+            elif price < g*1.2: breakdown['Fundamental'] += 10
+        if eps > 0: breakdown['Fundamental'] += 20
+        if not eps and "USD" in ticker: breakdown['Fundamental'] = 20
         beta = info.get('beta', 1.0)
         if beta is None: beta = 1.0
-        
-        # Preferimos Betas cercanos a 1 o menores. Betas muy altos restan.
-        if 0.8 <= beta <= 1.2: breakdown['Riesgo'] += 20 # Riesgo Mercado
-        elif beta < 0.8: breakdown['Riesgo'] += 15 # Defensiva
-        elif beta > 1.5: breakdown['Riesgo'] += 5 # Muy volátil
+        if 0.8 <= beta <= 1.2: breakdown['Riesgo'] += 20
+        elif beta < 0.8: breakdown['Riesgo'] += 15
+        elif beta > 1.5: breakdown['Riesgo'] += 5
         else: breakdown['Riesgo'] += 10
-        
         score = breakdown['Técnico'] + breakdown['Fundamental'] + breakdown['Riesgo']
         return score, breakdown
-        
-    except Exception as e:
-        return 0, breakdown
+    except: return 0, breakdown
 
 def dibujar_velocimetro(score):
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = score,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "Quant Score (0-100)"},
-        gauge = {
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "white"},
-            'steps': [
-                {'range': [0, 40], 'color': "#ff4b4b"}, # Rojo
-                {'range': [40, 70], 'color': "#ffa500"}, # Naranja
-                {'range': [70, 100], 'color': "#00cc96"}], # Verde
-            'threshold': {
-                'line': {'color': "white", 'width': 4},
-                'thickness': 0.75,
-                'value': score}
-        }
-    ))
-    fig.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor="#0e1117", font={'color': "white"})
+    fig = go.Figure(go.Indicator(mode="gauge+number", value=score, domain={'x': [0, 1], 'y': [0, 1]},
+        gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "white"},
+               'steps': [{'range': [0, 40], 'color': "#ff4b4b"}, {'range': [40, 70], 'color': "#ffa500"}, {'range': [70, 100], 'color': "#00cc96"}]}))
+    fig.update_layout(height=250, margin=dict(l=20, r=20, t=30, b=20), paper_bgcolor="#0e1117", font={'color': "white"})
     return fig
 
-# --- MOTORES EXISTENTES ---
+# --- GRÁFICO MASTER ACTUALIZADO V52 (CON VWAP) ---
+def graficar_master(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
+        if df.empty: return None
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        
+        # Indicadores
+        df['EMA20'] = ta.ema(df['Close'], 20)
+        df['RSI'] = ta.rsi(df['Close'], 14)
+        # VWAP (Calculado manualmente para este timeframe para asegurar compatibilidad)
+        df['VWAP'] = (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+        
+        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
+        
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+        
+        # Precio y VWAP
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
+        if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
+        
+        # VWAP (Línea Dorada - Institucional)
+        fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=2), name="VWAP (Inst.)"), row=1, col=1)
+        
+        try: 
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
+        except: pass
+        
+        # RSI
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name="RSI"), row=2, col=1)
+        fig.add_hline(y=70, line_color="red", row=2, col=1); fig.add_hline(y=30, line_color="green", row=2, col=1)
+        
+        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0))
+        return fig
+    except: return None
+
+@st.cache_data(ttl=600)
+def generar_mapa_calor(tickers):
+    try:
+        data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
+        pct = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        df = pd.DataFrame({'Ticker': pct.index, 'Variacion': pct.values, 'Precio': data.iloc[-1].values})
+        sec = []
+        for t in df['Ticker']:
+            if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sec.append('Tech')
+            elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sec.append('Cripto')
+            elif t in ['SPY', 'QQQ', 'DIA']: sec.append('Índices')
+            elif t in ['GLD', 'USO']: sec.append('Commodities')
+            else: sec.append('Otros')
+        df['Sector'] = sec; df['Size'] = df['Precio'] 
+        return df
+    except: return None
+
 def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
     try:
         df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
@@ -206,64 +245,11 @@ def optimizar_parametros_estrategia(ticker, estrategia="RSI"):
         return pd.DataFrame(resultados)
     except: return pd.DataFrame()
 
-@st.cache_data(ttl=600)
-def generar_mapa_calor(tickers):
-    try:
-        data = yf.download(" ".join(tickers), period="5d", interval="1d", progress=False, auto_adjust=True)['Close']
-        pct = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
-        df = pd.DataFrame({'Ticker': pct.index, 'Variacion': pct.values, 'Precio': data.iloc[-1].values})
-        sec = []
-        for t in df['Ticker']:
-            if t in ['NVDA', 'AMD', 'TSLA', 'AAPL', 'MSFT', 'META', 'GOOGL']: sec.append('Tech')
-            elif t in ['BTC-USD', 'ETH-USD', 'COIN']: sec.append('Cripto')
-            elif t in ['SPY', 'QQQ', 'DIA']: sec.append('Índices')
-            elif t in ['GLD', 'USO']: sec.append('Commodities')
-            else: sec.append('Otros')
-        df['Sector'] = sec; df['Size'] = df['Precio'] 
-        return df
-    except: return None
-
-def graficar_master(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
-        if df.empty: return None
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
-        df['EMA20'] = ta.ema(df['Close'], 20); df['RSI'] = ta.rsi(df['Close'], 14)
-        bb = ta.bbands(df['Close'], length=20, std=2); df = pd.concat([df, bb], axis=1)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Precio"), row=1, col=1)
-        if 'EMA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='yellow', width=1), name="EMA 20"), row=1, col=1)
-        try: 
-            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -3], line=dict(color='cyan', width=1, dash='dot'), name="Upper"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df.iloc[:, -1], line=dict(color='cyan', width=1, dash='dot'), name="Lower"), row=1, col=1)
-        except: pass
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple'), name="RSI"), row=2, col=1)
-        fig.add_hline(y=70, line_color="red", row=2, col=1); fig.add_hline(y=30, line_color="green", row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=0, b=0))
-        return fig
-    except: return None
-
-@st.cache_data(ttl=300)
-def escanear_oportunidades(tickers):
-    s = []
-    try: data = yf.download(" ".join(tickers), period="3mo", progress=False, group_by='ticker', auto_adjust=True)
-    except: return pd.DataFrame()
-    for t in tickers:
-        try:
-            df = data[t].dropna() if len(tickers) > 1 else data.dropna()
-            if len(df) < 14: continue
-            c = df['Close'].iloc[-1]; r = ta.rsi(df['Close'], 14).iloc[-1]
-            if r < 30: s.append({"Ticker": t, "Señal": "COMPRA RSI 🟢"})
-            elif r > 70: s.append({"Ticker": t, "Señal": "VENTA RSI 🔴"})
-        except: pass
-    return pd.DataFrame(s)
-
-# --- INTERFAZ V51: THE JUDGE ---
-st.title("⚖️ Sistema Quant V51: The Judge")
+# --- INTERFAZ V52: WHALE TRACKER ---
+st.title("🐋 Sistema Quant V52: Whale Tracker")
 
 # DASHBOARD EJECUTIVO
 df_pos = auditar_posiciones_sql()
-df_alerts = escanear_oportunidades(WATCHLIST)
 
 col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
 with col_kpi1:
@@ -273,14 +259,22 @@ with col_kpi2:
     pnl = df_pos['P&L ($)'].sum() if not df_pos.empty else 0.0
     st.metric("P&L Total", f"${pnl:+.2f}", delta_color="normal")
 with col_kpi3:
-    st.metric("Oportunidades", str(len(df_alerts) if not df_alerts.empty else 0))
-with col_kpi4:
     sp500 = yf.Ticker("SPY").history(period="2d")['Close']
     st.metric("Mercado (SP500)", f"${sp500.iloc[-1]:.2f}")
+with col_kpi4:
+    # Sensor Rápido de Ballenas
+    whale_count = 0
+    with st.expander("🐋 Radar de Ballenas", expanded=False):
+        for t in WATCHLIST[:5]: # Solo check rápido
+            w = detectar_actividad_ballenas(t)
+            if w and w['Alerta']: 
+                st.write(f"⚠️ {t}: {w['Alerta']}")
+                whale_count += 1
+    st.metric("Alertas Volumen", f"{whale_count}")
 
 st.divider()
 
-main_tabs = st.tabs(["💼 MESA DE DINERO", "📊 ANÁLISIS & SENTENCIA", "🧬 LABORATORIO QUANT"])
+main_tabs = st.tabs(["💼 MESA DE DINERO", "📊 ANÁLISIS 360", "🧬 LABORATORIO QUANT"])
 
 # --- TAB 1: OPERATIVA ---
 with main_tabs[0]:
@@ -300,7 +294,7 @@ with main_tabs[0]:
             if st.form_submit_button("CONFIRMAR ORDEN (SQL)"):
                 registrar_operacion_sql(t_op, tipo, qty, precio_ejec); st.rerun()
 
-# --- TAB 2: ANÁLISIS & SENTENCIA (NUEVO V51) ---
+# --- TAB 2: ANÁLISIS 360 (NUEVO V52) ---
 with main_tabs[1]:
     col_ana1, col_ana2 = st.columns([1, 2])
     
@@ -308,25 +302,32 @@ with main_tabs[1]:
         sel_ticker = st.selectbox("Analizar Activo:", WATCHLIST)
         st.write("---")
         
-        # EL JUEZ (SCORING V51)
+        # EL JUEZ (SCORING)
         score, breakdown = calcular_score_quant(sel_ticker)
+        st.markdown(f"### ⚖️ Score: {score}/100")
+        st.plotly_chart(dibujar_velocimetro(score), use_container_width=True)
         
-        st.markdown(f"### ⚖️ Veredicto: {score}/100")
-        fig_gauge = dibujar_velocimetro(score)
-        st.plotly_chart(fig_gauge, use_container_width=True)
-        
-        # Explicación del Veredicto
-        st.markdown("#### 📝 Desglose de la Sentencia:")
-        c_t, c_f, c_r = st.columns(3)
-        c_t.metric("Técnico", f"{breakdown['Técnico']}/40")
-        c_f.metric("Fundam.", f"{breakdown['Fundamental']}/40")
-        c_r.metric("Riesgo", f"{breakdown['Riesgo']}/20")
-        
-        if score >= 70: st.success("✅ CONCLUSIÓN: Oportunidad de COMPRA sólida.")
-        elif score <= 40: st.error("❌ CONCLUSIÓN: Activo peligroso o sobrevalorado. VENTA/ESPERAR.")
-        else: st.warning("⚠️ CONCLUSIÓN: Mantener/Observar. Faltan catalizadores.")
+        # DATOS DE BALLENAS (NUEVO V52)
+        whale_data = detectar_actividad_ballenas(sel_ticker)
+        st.markdown("#### 🐋 Flujo Institucional")
+        if whale_data:
+            if whale_data['Alerta']:
+                st.markdown(f"<div class='whale-alert'>🚨 {whale_data['Alerta']}</div>", unsafe_allow_html=True)
+            else:
+                st.info("Volumen normal. Sin actividad inusual.")
+            
+            w1, w2 = st.columns(2)
+            w1.metric("Volumen Hoy", f"{whale_data['Volumen Hoy']/1000:.1f}K", help="Miles de acciones")
+            w2.metric("Ratio vs Prom.", f"{whale_data['Ratio Vol']:.1f}x")
+            
+            st.metric("VWAP (Precio Justo)", f"${whale_data['VWAP']:.2f}")
+            if "ALCISTA" in whale_data['Tendencia']:
+                st.success(f"Tendencia: {whale_data['Tendencia']}")
+            else:
+                st.error(f"Tendencia: {whale_data['Tendencia']}")
 
     with col_ana2:
+        # GRÁFICO CON VWAP
         fig = graficar_master(sel_ticker)
         if fig: st.plotly_chart(fig, use_container_width=True)
         
@@ -336,7 +337,7 @@ with main_tabs[1]:
                 if df_map is not None:
                     fig_heat = px.treemap(df_map, path=['Sector', 'Ticker'], values='Size', color='Variacion', color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
                     st.plotly_chart(fig_heat, use_container_width=True)
-            except: st.warning("Datos no disponibles.")
+            except: pass
 
 # --- TAB 3: LABORATORIO ---
 with main_tabs[2]:
