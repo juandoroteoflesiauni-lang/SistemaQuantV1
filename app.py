@@ -22,19 +22,24 @@ import google.generativeai as genai
 from fpdf import FPDF
 import base64
 
-# --- CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN MAESTRA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V80 (The Sentiment)", layout="wide", page_icon="📰")
+st.set_page_config(page_title="Sistema Quant V81 (Master Terminal)", layout="wide", page_icon="🏛️")
 
+# Estilos CSS Profesionales (Dark Bloomberg Style)
 st.markdown("""<style>
-    .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .news-card {background-color: #1e202e; border-left: 3px solid #FFD700; padding: 15px; margin-bottom: 10px; border-radius: 5px;}
-    .sentiment-pos {color: #00ff00; font-weight: bold;}
-    .sentiment-neg {color: #ff4b4b; font-weight: bold;}
-    .stTabs [data-baseweb="tab-list"] {gap: 5px;}
-    .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
+    .main {background-color: #0e1117;}
+    .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
+    .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
+    .metric-label {font-size: 14px; color: #a0a0a0;}
+    .profit {color: #00cc96;}
+    .loss {color: #ff4b4b;}
+    .ai-box {background-color: #131420; border-left: 4px solid #9c27b0; padding: 20px; border-radius: 5px; margin-top: 10px;}
+    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
+    .sidebar-text {font-size: 12px; color: #888;}
 </style>""", unsafe_allow_html=True)
 
+# API Keys
 try:
     secrets = toml.load(".streamlit/secrets.toml") if os.path.exists(".streamlit/secrets.toml") else st.secrets
     genai.configure(api_key=secrets["GOOGLE_API_KEY"])
@@ -44,143 +49,21 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR NLP DE SENTIMIENTO (NUEVO V80) ---
-def analizar_sentimiento_noticias(ticker):
-    """Descarga noticias y calcula un score de sentimiento básico"""
-    if "USD" in ticker: return None # Las noticias de crypto en yfinance a veces fallan
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news
-        
-        if not news: return None
-        
-        # Diccionarios de Sentimiento (Simple pero efectivo para velocidad)
-        bullish_words = ['up', 'rise', 'jump', 'gain', 'buy', 'bull', 'profit', 'beat', 'growth', 'surge', 'record', 'high', 'strong']
-        bearish_words = ['down', 'drop', 'fall', 'loss', 'sell', 'bear', 'miss', 'risk', 'crash', 'weak', 'lower', 'cut', 'lawsuit']
-        
-        total_score = 0
-        news_processed = []
-        
-        for n in news[:5]: # Analizar las últimas 5 noticias
-            title = n['title']
-            link = n['link']
-            publisher = n['publisher']
-            # Convertir timestamp
-            try: pub_time = datetime.fromtimestamp(n['providerPublishTime']).strftime('%Y-%m-%d %H:%M')
-            except: pub_time = "Reciente"
-            
-            # Análisis NLP Básico
-            title_lower = title.lower()
-            score = 0
-            for w in bullish_words: 
-                if w in title_lower: score += 1
-            for w in bearish_words: 
-                if w in title_lower: score -= 1
-            
-            total_score += score
-            
-            # Etiqueta
-            sentiment_label = "Positivo 🟢" if score > 0 else "Negativo 🔴" if score < 0 else "Neutral ⚪"
-            
-            news_processed.append({
-                "Titulo": title,
-                "Fuente": publisher,
-                "Hora": pub_time,
-                "Link": link,
-                "Sentimiento": sentiment_label,
-                "Score": score
-            })
-            
-        # Normalizar Score Final (-10 a +10 aprox)
-        final_sentiment = "NEUTRAL"
-        if total_score >= 2: final_sentiment = "ALCISTA (Bullish) 🐂"
-        elif total_score <= -2: final_sentiment = "BAJISTA (Bearish) 🐻"
-        
-        return {
-            "Noticias": news_processed,
-            "Score_Total": total_score,
-            "Sentimiento_Global": final_sentiment
-        }
-            
-    except Exception as e: return None
+# --- 2. MOTORES DE DATOS (BACKEND) ---
 
-# --- MOTORES EXISTENTES (V79) ---
-def entrenar_modelo_ml(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="2y")
-        if len(df) < 200: return None
-        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA_Diff'] = (df['Close'] - ta.sma(df['Close'], 50)) / ta.sma(df['Close'], 50)
-        df['Vol_Change'] = df['Volume'].pct_change(); df['Return'] = df['Close'].pct_change()
-        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-        df = df.dropna()
-        X = df[['RSI', 'SMA_Diff', 'Vol_Change', 'Return']]; y = df['Target']
-        split = int(len(df) * 0.8)
-        clf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
-        clf.fit(X.iloc[:split], y.iloc[:split])
-        acc = accuracy_score(y.iloc[split:], clf.predict(X.iloc[split:]))
-        pred = clf.predict(X.iloc[[-1]])[0]
-        prob = clf.predict_proba(X.iloc[[-1]])[0][pred]
-        return {"Prediccion": "SUBE 🟢" if pred == 1 else "BAJA 🔴", "Accuracy": acc * 100, "Probabilidad": prob * 100}
-    except: return None
-
-@st.cache_data(ttl=1800)
-def obtener_datos_snapshot(ticker):
-    try:
-        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
-        if hist.empty: return None
-        try: info = stock.info
-        except: info = {}
-        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50, "Volumen": info.get('volume', 0), "Beta": info.get('beta', 1.0), "Target": info.get('targetMeanPrice', 0)}
-    except: return None
-
-def detectar_patrones_avanzados(df):
-    if df.empty: return df
-    df['Cuerpo'] = abs(df['Close'] - df['Open'])
-    df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
-    df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
-    df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & (df['Mecha_Sup'] < 0.5 * df['Cuerpo'])
-    df['Patron_BullEng'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Close'] > df['Open'].shift(1)) & (df['Open'] < df['Close'].shift(1))
-    return df
-
-def graficar_pro_v78(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
-        if df.empty: return None
-        df = detectar_patrones_avanzados(df)
-        df['SMA50'] = ta.sma(df['Close'], 50); df['SMA200'] = ta.sma(df['Close'], 200)
-        martillos = df[df['Patron_Martillo']]
-        bull_eng = df[df['Patron_BullEng']]
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='cyan', width=1), name='SMA 50'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=martillos.index, y=martillos['Low']*0.98, mode='markers', marker=dict(symbol='diamond', size=10, color='#00ff00'), name='Martillo'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=bull_eng.index, y=bull_eng['Low']*0.97, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00cc96'), name='Bullish Engulfing'), row=1, col=1)
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='rgba(100, 100, 100, 0.5)', name='Volumen'), row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
-    except: return None
-
-@st.cache_data(ttl=3600)
-def obtener_datos_insider(ticker):
-    if "USD" in ticker: return None
-    try:
-        info = yf.Ticker(ticker).info
-        sh_short = info.get('sharesShort', 0); float_sh = info.get('floatShares', 1)
-        short_pct = (sh_short/float_sh)*100 if float_sh else 0
-        inst_pct = info.get('heldPercentInstitutions', 0)*100
-        return {"Institucional": inst_pct, "Short_Float": short_pct}
-    except: return None
-
-# --- MOTOR SQL ---
+# Motor SQL
 def init_db():
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL)''')
     conn.commit(); conn.close()
-def registrar_operacion_sql(t, tipo, q, p):
+
+def registrar_operacion(t, tipo, q, p):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     total = q * p; fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("INSERT INTO trades (fecha, ticker, tipo, cantidad, precio, total) VALUES (?, ?, ?, ?, ?, ?)", (fecha, t, tipo, q, p, total))
     conn.commit(); conn.close()
-def auditar_posiciones_sql():
+
+def obtener_cartera():
     conn = sqlite3.connect(DB_NAME); df = pd.read_sql_query("SELECT * FROM trades", conn); conn.close()
     if df.empty: return pd.DataFrame()
     pos = {}
@@ -195,139 +78,256 @@ def auditar_posiciones_sql():
     res = []
     activos = [t for t, d in pos.items() if d['Qty'] > 0]
     if not activos: return pd.DataFrame()
+    
     try: curr = yf.download(" ".join(activos), period="1d", progress=False, auto_adjust=True)['Close']
     except: return pd.DataFrame()
+    
     for t in activos:
         d = pos[t]
         try:
-            if len(activos) == 1: px = float(curr.iloc[-1])
-            else: px = float(curr.iloc[-1][t])
+            px = float(curr.iloc[-1]) if len(activos) == 1 else float(curr.iloc[-1][t])
             val = d['Qty'] * px; pnl = val - d['Cost']
-            res.append({"Ticker": t, "Cantidad": d['Qty'], "Valor": val, "P&L": pnl})
+            pct = (pnl / d['Cost']) * 100 if d['Cost'] > 0 else 0
+            res.append({"Ticker": t, "Cantidad": d['Qty'], "Precio Prom": d['Cost']/d['Qty'], "Precio Actual": px, "Valor": val, "P&L $": pnl, "P&L %": pct})
         except: pass
     return pd.DataFrame(res)
+
 init_db()
-@st.cache_data(ttl=1800)
-def escanear_mercado_completo(tickers):
+
+# Motor Snapshot (Datos rápidos)
+@st.cache_data(ttl=900)
+def get_snapshot(ticker):
+    try:
+        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
+        if hist.empty: return None
+        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50}
+    except: return None
+
+# Motor Ranking (Scanner)
+@st.cache_data(ttl=3600)
+def scanner_mercado(tickers):
     ranking = []
-    try: data_hist = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
+    try: data = yf.download(" ".join(tickers), period="6mo", group_by='ticker', progress=False, auto_adjust=True)
     except: return pd.DataFrame()
+    
     for t in tickers:
         try:
-            time.sleep(0.05) 
-            df = data_hist[t].dropna() if len(tickers)>1 else data_hist.dropna()
+            df = data[t].dropna() if len(tickers)>1 else data.dropna()
             if df.empty: continue
-            try: info = yf.Ticker(t).info
-            except: info = {}
-            pe = info.get('trailingPE', 50); val = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
-            curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
-            mom = 0
-            if curr > s200: mom += 50
-            if rsi > 50: mom += (rsi - 50) * 2
-            mom = max(0, min(100, mom))
-            score = (val * 0.4) + (mom * 0.6)
-            if "USD" in t: score = mom
-            ranking.append({"Ticker": t, "Score": round(score, 1), "Precio": curr, "Value": round(val,0), "Momentum": round(mom,0)})
+            
+            # Cálculo Quant Simplificado (Para velocidad)
+            curr = df['Close'].iloc[-1]
+            rsi = ta.rsi(df['Close'], 14).iloc[-1]
+            sma200 = df['Close'].rolling(200).mean().iloc[-1]
+            
+            trend = "Alcista" if curr > sma200 else "Bajista"
+            score = 50
+            if trend == "Alcista": score += 20
+            if rsi < 30: score += 20 # Rebote
+            elif rsi > 70: score -= 10 # Sobrecompra
+            
+            ranking.append({"Ticker": t, "Precio": curr, "RSI": rsi, "Tendencia": trend, "Score": score})
         except: pass
-    return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
+    return pd.DataFrame(ranking).sort_values("Score", ascending=False)
 
-# --- INTERFAZ V80 ---
-c1, c2 = st.columns([3, 1])
-with c1: st.title("📰 Quant Terminal V80: The Sentiment")
-with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
+# Motor ML (Oráculo)
+def oraculo_ml(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="2y")
+        if len(df)<200: return None
+        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA_Diff'] = (df['Close'] - ta.sma(df['Close'], 50))/ta.sma(df['Close'], 50)
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+        df = df.dropna()
+        X = df[['RSI', 'SMA_Diff']]; y = df['Target']
+        split = int(len(df)*0.8)
+        clf = RandomForestClassifier(n_estimators=100, random_state=42).fit(X.iloc[:split], y.iloc[:split])
+        acc = accuracy_score(y.iloc[split:], clf.predict(X.iloc[split:]))
+        pred = clf.predict(X.iloc[[-1]])[0]
+        prob = clf.predict_proba(X.iloc[[-1]])[0][pred]
+        return {"Pred": "SUBE 🟢" if pred==1 else "BAJA 🔴", "Acc": acc*100, "Prob": prob*100}
+    except: return None
 
-snap = obtener_datos_snapshot(sel_ticker)
-if snap:
-    delta = ((snap['Precio'] - snap['Previo'])/snap['Previo'])*100
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Precio", f"${snap['Precio']:.2f}", f"{delta:+.2f}%")
-    k2.metric("RSI", f"{snap['RSI']:.0f}")
-    k3.metric("Vol", f"{snap['Volumen']/1e6:.1f}M")
-    k4.metric("Beta", f"{snap['Beta']:.2f}")
-    k5.metric("Target", f"${snap['Target']:.2f}")
+# Motor NLP (Sentimiento)
+def sentiment_nlp(ticker):
+    if "USD" in ticker: return None
+    try:
+        news = yf.Ticker(ticker).news[:3]
+        score = 0
+        bull = ['up', 'rise', 'growth', 'buy', 'strong']; bear = ['down', 'drop', 'loss', 'sell', 'weak']
+        titles = []
+        for n in news:
+            t = n['title'].lower()
+            titles.append(n['title'])
+            if any(w in t for w in bull): score += 1
+            if any(w in t for w in bear): score -= 1
+        return {"Score": score, "Titulos": titles, "Label": "Positivo" if score>0 else "Negativo" if score<0 else "Neutral"}
+    except: return None
 
-st.divider()
+# Motor PDF
+class PDFReport(FPDF):
+    def header(self): self.set_font('Arial', 'B', 15); self.cell(0, 10, 'Informe Quant V81', 0, 1, 'C'); self.ln(5)
+def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
+def generar_pdf(ticker, data, ia_text):
+    pdf = PDFReport(); pdf.add_page(); pdf.set_font('Arial', 'B', 16)
+    pdf.cell(0, 10, f'Analisis: {ticker}', 0, 1); pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 10, f'Precio: ${data["Precio"]:.2f} | RSI: {data["RSI"]:.0f}', 0, 1)
+    pdf.ln(5); pdf.multi_cell(0, 6, clean(ia_text))
+    return pdf.output(dest='S').encode('latin-1')
 
-col_main, col_side = st.columns([2, 1])
+# Motor IA
+def consultar_ia(contexto):
+    try: return model.generate_content(contexto).text
+    except: return "IA no disponible."
 
-with col_main:
-    st.subheader("📉 Acción del Precio")
-    fig_chart = graficar_pro_v78(sel_ticker)
-    if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
+# --- 3. INTERFAZ GRÁFICA (FRONTEND) ---
+
+# SIDEBAR (Control Global)
+with st.sidebar:
+    st.title("🏛️ Quant V81")
+    st.caption("Terminal de Gestión Institucional")
+    st.markdown("---")
     
-    tabs_detail = st.tabs(["📰 SENTIMIENTO (NLP)", "🤖 Oráculo ML", "🦈 Institucionales", "📝 IA"])
+    sel_ticker = st.selectbox("🔍 Activo", WATCHLIST)
     
-    # --- TAB 1: SENTIMIENTO DE MERCADO (NUEVO V80) ---
-    with tabs_detail[0]:
-        st.subheader("📰 Análisis Psicológico & Noticias")
+    st.markdown("### ⚡ Operar")
+    with st.form("trade_form"):
+        qty = st.number_input("Cantidad", 1, 1000, 10)
+        side = st.selectbox("Lado", ["COMPRA", "VENTA"])
+        if st.form_submit_button("EJECUTAR ORDEN"):
+            current = get_snapshot(sel_ticker)
+            if current:
+                registrar_operacion(sel_ticker, side, qty, current['Precio'])
+                st.success(f"Orden ejecutada @ ${current['Precio']:.2f}")
+                time.sleep(1)
+                st.rerun()
+            else: st.error("Sin precio.")
+    
+    st.markdown("---")
+    st.info("Usuario: Estudiante UNRC\nPerfil: Contador/Quant\nVersion: Release 8.1")
+
+# PESTAÑAS PRINCIPALES
+tabs = st.tabs(["📊 DASHBOARD EJECUTIVO", "🔬 LABORATORIO MICRO", "🤖 INTELIGENCIA (AI)", "💼 CARTERA"])
+
+# --- TAB 1: DASHBOARD (Resumen Global) ---
+with tabs[0]:
+    st.subheader("🌍 Visión de Mercado")
+    
+    # KPIs Superiores
+    df_pos = obtener_cartera()
+    patrimonio = df_pos['Valor'].sum() if not df_pos.empty else 0
+    pnl_total = df_pos['P&L $'].sum() if not df_pos.empty else 0
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f"<div class='metric-card'><div class='metric-label'>Patrimonio Neto</div><div class='metric-value'>${patrimonio:,.2f}</div></div>", unsafe_allow_html=True)
+    color_pnl = "profit" if pnl_total >= 0 else "loss"
+    c2.markdown(f"<div class='metric-card'><div class='metric-label'>P&L Total</div><div class='metric-value {color_pnl}'>${pnl_total:+,.2f}</div></div>", unsafe_allow_html=True)
+    
+    # Mini Scanner en Dashboard
+    ranking = scanner_mercado(WATCHLIST)
+    if not ranking.empty:
+        top = ranking.iloc[0]
+        c3.markdown(f"<div class='metric-card'><div class='metric-label'>🔥 Top Oportunidad</div><div class='metric-value'>{top['Ticker']}</div><small>Score: {top['Score']}</small></div>", unsafe_allow_html=True)
+    
+    # SPY Quick View
+    spy_data = get_snapshot("SPY")
+    if spy_data:
+        spy_delta = ((spy_data['Precio']-spy_data['Previo'])/spy_data['Previo'])*100
+        color_spy = "profit" if spy_delta >= 0 else "loss"
+        c4.markdown(f"<div class='metric-card'><div class='metric-label'>S&P 500</div><div class='metric-value {color_spy}'>{spy_delta:+.2f}%</div></div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    
+    # Gráfico de Cartera vs Tabla Top
+    kc1, kc2 = st.columns([1, 2])
+    with kc1:
+        st.markdown("##### 💼 Distribución")
+        if not df_pos.empty:
+            fig = px.pie(df_pos, values='Valor', names='Ticker', hole=0.5)
+            fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=250, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else: st.info("Sin activos.")
         
-        with st.spinner("Leyendo noticias y analizando tono (NLP)..."):
-            sentiment_data = analizar_sentimiento_noticias(sel_ticker)
-            
-            if sentiment_data:
-                # Medidor de Sentimiento (Gauge)
-                st.markdown(f"#### Estado de Ánimo: **{sentiment_data['Sentimiento_Global']}**")
-                
-                fig_gauge = go.Figure(go.Indicator(
-                    mode = "gauge+number+delta",
-                    value = sentiment_data['Score_Total'],
-                    domain = {'x': [0, 1], 'y': [0, 1]},
-                    title = {'text': "Sentiment Score (-10 a +10)"},
-                    delta = {'reference': 0},
-                    gauge = {
-                        'axis': {'range': [-10, 10]},
-                        'bar': {'color': "white"},
-                        'steps': [
-                            {'range': [-10, -2], 'color': "#ff4b4b"},
-                            {'range': [-2, 2], 'color': "gray"},
-                            {'range': [2, 10], 'color': "#00cc96"}],
-                    }
-                ))
-                fig_gauge.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), paper_bgcolor="#0e1117", font={'color': "white"})
-                st.plotly_chart(fig_gauge, use_container_width=True)
-                
-                st.markdown("---")
-                st.markdown("#### 🗞️ Últimas Noticias Relevantes")
-                
-                for n in sentiment_data['Noticias']:
-                    color_s = "sentiment-pos" if "Positivo" in n['Sentimiento'] else "sentiment-neg" if "Negativo" in n['Sentimiento'] else "white"
-                    st.markdown(f"""
-                    <div class='news-card'>
-                        <a href='{n['Link']}' target='_blank' style='color: #FFD700; text-decoration: none; font-size: 16px; font-weight: bold;'>{n['Titulo']}</a>
-                        <br>
-                        <small>{n['Fuente']} | {n['Hora']}</small>
-                        <br>
-                        Impacto Detectado: <span class='{color_s}'>{n['Sentimiento']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("No se encontraron noticias recientes o el activo no soporta feed de noticias (Cripto/Forex).")
+    with kc2:
+        st.markdown("##### 🏆 Ranking de Mercado (Tiempo Real)")
+        st.dataframe(ranking.head(5), use_container_width=True)
 
-    with tabs_detail[1]:
-        if st.button("🧠 ENTRENAR ML"):
-            ml_res = entrenar_modelo_ml(sel_ticker)
-            if ml_res: st.metric("Predicción", ml_res['Prediccion'], f"Certeza: {ml_res['Probabilidad']:.1f}%")
-            
-    with tabs_detail[2]:
-        insider = obtener_datos_insider(sel_ticker)
-        if insider:
-            c1, c2 = st.columns(2); c1.metric("Institucional", f"{insider['Institucional']:.1f}%"); c2.metric("Shorts", f"{insider['Short_Float']:.2f}%")
-
-    with tabs_detail[3]:
-        if st.button("Generar Informe IA"):
-            try: st.write(model.generate_content(f"Analisis {sel_ticker}").text)
-            except: st.error("Error IA")
-
-with col_side:
-    st.subheader("⚡ Quick Trade")
-    with st.form("quick"):
-        q = st.number_input("Qty", 1, 1000, 10); s = st.selectbox("Side", ["COMPRA", "VENTA"])
-        if st.form_submit_button("EJECUTAR"): 
-            if snap: registrar_operacion_sql(sel_ticker, s, q, snap['Precio']); st.success("Orden OK")
+# --- TAB 2: MICRO (Análisis Profundo) ---
+with tabs[1]:
+    col_anal1, col_anal2 = st.columns([3, 1])
     
-    st.subheader("🏆 Ranking")
-    if st.button("🔄 ESCANEAR"): st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
+    with col_anal1:
+        st.subheader(f"🔎 Análisis Técnico: {sel_ticker}")
+        snap = get_snapshot(sel_ticker)
+        if snap:
+            # Gráfico Interactivo
+            df_chart = yf.Ticker(sel_ticker).history(period="1y")
+            df_chart['SMA50'] = ta.sma(df_chart['Close'], 50)
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+            fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name="Precio"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA50'], line=dict(color='orange'), name="SMA50"), row=1, col=1)
+            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name="Volumen"), row=2, col=1)
+            fig.update_layout(template="plotly_dark", height=500, margin=dict(l=0,r=0,t=0,b=0))
+            st.plotly_chart(fig, use_container_width=True)
+            
+    with col_anal2:
+        st.markdown("##### 📡 Datos Clave")
+        if snap:
+            st.metric("Precio", f"${snap['Precio']:.2f}")
+            st.metric("RSI (14)", f"{snap['RSI']:.0f}")
+            
+            # Mini Fundamental
+            try:
+                info = yf.Ticker(sel_ticker).info
+                st.metric("P/E Ratio", f"{info.get('trailingPE', 0):.1f}")
+                st.metric("Target", f"${info.get('targetMeanPrice', 0):.2f}")
+            except: pass
+
+# --- TAB 3: INTELIGENCIA (AI & ML) ---
+with tabs[2]:
+    st.subheader(f"🧠 Cerebro Digital: {sel_ticker}")
     
-    st.subheader("💼 Cartera")
-    df_p = auditar_posiciones_sql()
-    if not df_p.empty: st.dataframe(df_p[['Ticker', 'P&L']], use_container_width=True)
+    ia_c1, ia_c2, ia_c3 = st.columns(3)
+    
+    # 1. Sentimiento
+    with ia_c1:
+        st.markdown("#### 📰 Sentimiento (NLP)")
+        sent = sentiment_nlp(sel_ticker)
+        if sent:
+            color = "green" if sent['Label'] == "Positivo" else "red" if sent['Label'] == "Negativo" else "gray"
+            st.markdown(f"<h2 style='color:{color}'>{sent['Label']}</h2>", unsafe_allow_html=True)
+            for t in sent['Titulos']: st.caption(f"• {t}")
+        else: st.info("Sin noticias.")
+        
+    # 2. Machine Learning
+    with ia_c2:
+        st.markdown("#### 🤖 Oráculo ML")
+        if st.button("🔮 Predecir (Random Forest)"):
+            with st.spinner("Entrenando..."):
+                ml = oraculo_ml(sel_ticker)
+                if ml:
+                    st.markdown(f"<h2>{ml['Pred']}</h2>", unsafe_allow_html=True)
+                    st.metric("Confianza Histórica", f"{ml['Acc']:.1f}%")
+                    st.metric("Probabilidad", f"{ml['Prob']:.1f}%")
+                else: st.error("Error ML")
+                
+    # 3. Consultor LLM
+    with ia_c3:
+        st.markdown("#### 📝 Tesis Generativa")
+        if st.button("⚡ Generar Tesis IA"):
+            prompt = f"Analisis financiero corto para {sel_ticker}. Precio actual {snap['Precio'] if snap else 0}. RSI {snap['RSI'] if snap else 0}. Da recomendacion de compra/venta."
+            res = consultar_ia(prompt)
+            st.session_state['ia_res'] = res
+        
+        if 'ia_res' in st.session_state:
+            st.markdown(f"<div class='ai-box'>{st.session_state['ia_res']}</div>", unsafe_allow_html=True)
+            if st.button("📄 PDF"):
+                b64 = base64.b64encode(generar_pdf(sel_ticker, snap, st.session_state['ia_res'])).decode()
+                st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="Reporte.pdf">Descargar</a>', unsafe_allow_html=True)
+
+# --- TAB 4: GESTIÓN DE CARTERA ---
+with tabs[3]:
+    st.subheader("💼 Auditoría de Posiciones")
+    if not df_pos.empty:
+        st.dataframe(df_pos.style.format({"Valor": "${:.2f}", "P&L $": "${:+.2f}", "P&L %": "{:+.2f}%"}), use_container_width=True)
+    else:
+        st.info("No hay operaciones registradas. Usa el panel lateral para operar.")
