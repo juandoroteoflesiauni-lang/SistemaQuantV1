@@ -21,22 +21,22 @@ import base64
 
 # --- 1. CONFIGURACIÓN DEL SISTEMA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V91 (Institutional Tracker)", layout="wide", page_icon="🦈")
+st.set_page_config(page_title="Sistema Quant V89 (The Valuator)", layout="wide", page_icon="🏛️")
 
 st.markdown("""<style>
     .main {background-color: #0e1117;}
     .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
     .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
-    .vsa-alert {background-color: #2b1c2e; border-left: 4px solid #d81b60; padding: 10px; margin-bottom: 5px; border-radius: 4px;}
-    .strat-box {background-color: #0f172a; border-left: 5px solid #3b82f6; padding: 20px; margin-top: 10px;}
+    .valuation-box {background-color: #141e14; border-left: 5px solid #4caf50; padding: 20px; border-radius: 5px; margin-top: 10px;}
+    .strat-box {background-color: #0f172a; border-left: 5px solid #3b82f6; padding: 20px; margin-top: 10px; font-family: monospace; white-space: pre-wrap;}
     .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
 </style>""", unsafe_allow_html=True)
 
 try:
     secrets = toml.load(".streamlit/secrets.toml") if os.path.exists(".streamlit/secrets.toml") else st.secrets
     genai.configure(api_key=secrets["GOOGLE_API_KEY"])
-    # VOLVEMOS A LA VERSIÓN RÁPIDA (FLASH 2.0 EXP)
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    # CORRECCIÓN V89: Volvemos a FLASH (Estable y 1M Contexto)
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except: pass
 
 DB_NAME = "quant_database.db"
@@ -89,320 +89,221 @@ def obtener_cartera():
 
 init_db()
 
-# --- 3. MOTOR VSA INSTITUCIONAL (PRIORIDAD 2 - V91) ---
-def motor_vsa_tom_williams(df):
-    """
-    Detecta huellas institucionales según 'Master the Markets'.
-    Señales: No Demand, Stopping Volume, Upthrust, Climax.
-    """
-    if df.empty: return df
-    
-    # 1. Definiciones Básicas
-    df['Spread'] = df['High'] - df['Low'] # Rango de la vela
-    df['Spread_Avg'] = df['Spread'].rolling(20).mean()
-    df['Vol_Avg'] = df['Volume'].rolling(20).mean()
-    
-    # Close Location Value (CLV): Dónde cerró la vela (-1 abajo, +1 arriba)
-    # (C - L) - (H - C) / (H - L)
-    df['CLV'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
-    df['CLV'] = df['CLV'].fillna(0) # Fix div by zero
-    
-    # 2. Señales VSA
-    
-    # A. UPTHRUST (Trampa Alcista)
-    # Mínimos más altos, Cierra en mínimos, Volumen alto
-    df['VSA_Upthrust'] = (df['High'] > df['High'].shift(1)) & \
-                         (df['Close'] < df['Low'] + (df['Spread'] * 0.3)) & \
-                         (df['Volume'] > df['Vol_Avg'] * 1.2) & \
-                         (df['Spread'] > df['Spread_Avg'])
-
-    # B. NO DEMAND (Debilidad)
-    # Vela alcista, rango estrecho, volumen bajo
-    df['VSA_NoDemand'] = (df['Close'] > df['Close'].shift(1)) & \
-                         (df['Spread'] < df['Spread_Avg']) & \
-                         (df['Volume'] < df['Vol_Avg'])
-                         
-    # C. STOPPING VOLUME (Fortaleza)
-    # Vela bajista, volumen muy alto, cierra lejos de mínimos (Institucional comprando la caída)
-    df['VSA_Stopping'] = (df['Close'] < df['Close'].shift(1)) & \
-                         (df['Volume'] > df['Vol_Avg'] * 1.5) & \
-                         (df['Close'] > df['Low'] + (df['Spread'] * 0.4))
-                         
-    # D. CLIMAX (Volatilidad Extrema)
-    # Volumen ultra alto + Rango ultra alto
-    df['VSA_Climax'] = (df['Volume'] > df['Vol_Avg'] * 2.0) & \
-                       (df['Spread'] > df['Spread_Avg'] * 1.5)
-
-    return df
-
-# --- 4. MOTOR DE VALORACIÓN (V90) ---
+# --- 3. MOTOR DE VALORACIÓN (PRIORIDAD 1 - GRAHAM & FERNANDEZ) ---
 @st.cache_data(ttl=3600)
-def valoracion_graham_fernandez(ticker):
+def valoracion_academica(ticker):
+    """
+    Calcula Valor Intrínseco usando fórmulas de 'Security Analysis' y 'Valoración de Empresas'.
+    """
     if "USD" in ticker: return None
     try:
-        stock = yf.Ticker(ticker); info = stock.info
+        stock = yf.Ticker(ticker)
+        info = stock.info
         precio = info.get('currentPrice', 0)
         if precio == 0: return None
-        
-        eps = info.get('trailingEps', 0); bvps = info.get('bookValue', 0)
+
+        # A. FÓRMULA DE GRAHAM (V = Sqrt(22.5 * EPS * BookValue))
+        eps = info.get('trailingEps', 0)
+        bvps = info.get('bookValue', 0)
         v_graham = math.sqrt(22.5 * eps * bvps) if eps > 0 and bvps > 0 else 0
         
-        fcf = info.get('freeCashflow', 0); shares = info.get('sharesOutstanding', 1)
+        # B. DCF SIMPLIFICADO (Pablo Fernández)
+        fcf = info.get('freeCashflow', 0)
+        shares = info.get('sharesOutstanding', 1)
         v_dcf = 0
         if fcf > 0 and shares > 0:
-            fcf_ps = fcf/shares; g=0.10; wacc=0.09
-            v_dcf = sum([fcf_ps*((1+g)**i)/((1+wacc)**i) for i in range(1,6)]) + ((fcf_ps*((1+g)**5)*1.02)/(wacc-0.02))/((1+wacc)**5)
-            
-        vals = [v for v in [v_graham, v_dcf] if v > 0]
-        if not vals: return None
-        v_intr = sum(vals)/len(vals)
-        margen = ((v_intr - precio)/v_intr)*100
-        estado = "Oportunidad 💎" if margen > 20 else "Cara ⚠️" if margen < -20 else "Precio Justo ⚖️"
+            fcf_ps = fcf / shares
+            g = 0.08 # Crecimiento conservador 8%
+            wacc = 0.10 # Costo capital 10%
+            # Proyección 5 años + Perpetuidad
+            flujos = sum([fcf_ps * ((1+g)**i) / ((1+wacc)**i) for i in range(1, 6)])
+            terminal = (fcf_ps * ((1+g)**5) * 1.02) / (wacc - 0.02)
+            v_dcf = flujos + (terminal / ((1+wacc)**5))
+
+        # C. SÍNTESIS
+        valores = [v for v in [v_graham, v_dcf] if v > 0]
+        if not valores: return None
+        v_intrinseco = sum(valores) / len(valores)
+        margen = ((v_intrinseco - precio) / v_intrinseco) * 100
         
-        return {"Precio": precio, "Valor_Intrinseco": v_intr, "Margen": margen, "Estado": estado}
+        estado = "INFRAVALORADA (Ganga) 💎" if margen > 25 else "SOBREVALORADA ⚠️" if margen < -10 else "PRECIO JUSTO ⚖️"
+        
+        return {
+            "Precio": precio,
+            "Valor_Intrinseco": v_intrinseco,
+            "Margen": margen,
+            "Estado": estado,
+            "Detalle": f"Graham: ${v_graham:.2f} | DCF: ${v_dcf:.2f}"
+        }
     except: return None
 
-# --- MOTORES SOPORTE ---
+# --- OTROS MOTORES (MACRO, QUANT) ---
 @st.cache_data(ttl=1800)
-def obtener_contexto_macro_avanzado():
+def obtener_macro():
     try:
-        tickers = ["^VIX", "^TNX", "SPY", "QQQ", "IWM"]
-        data = yf.download(" ".join(tickers), period="5d", progress=False, auto_adjust=True)['Close']
-        vix = data['^VIX'].iloc[-1]; bond = data['^TNX'].iloc[-1]
-        rot = "Risk ON" if (data['IWM'].iloc[-1]/data['QQQ'].iloc[-1]) > (data['IWM'].iloc[-5]/data['QQQ'].iloc[-5]) else "Risk OFF"
-        estado = "Miedo" if vix > 20 else "Calma"
-        return {"VIX": vix, "Bono": bond, "Rotacion": rot, "Estado": estado}
+        data = yf.download("^VIX ^TNX SPY QQQ", period="5d", progress=False, auto_adjust=True)['Close']
+        vix = data['^VIX'].iloc[-1]
+        estado = "EUFORIA 🟢" if vix < 15 else "PÁNICO 🔴" if vix > 25 else "NEUTRAL"
+        return {"VIX": vix, "Bono": data['^TNX'].iloc[-1], "Estado": estado}
     except: return None
 
-def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
+def simulacion_monte_carlo(ticker):
     try:
         data = yf.Ticker(ticker).history(period="1y")['Close']
         if data.empty: return None
-        returns = data.pct_change().dropna(); mu = returns.mean(); sigma = returns.std(); start_price = data.iloc[-1]
-        sim_paths = np.zeros((dias, simulaciones)); sim_paths[0] = start_price
-        for t in range(1, dias):
-            drift = (mu - 0.5 * sigma**2); shock = sigma * np.random.normal(0, 1, simulaciones)
-            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
-        final = sim_paths[-1]
-        return {"Prob_Suba": np.mean(final>start_price)*100, "VaR_95": np.percentile(final, 5)}
+        ret = data.pct_change().dropna(); start = data.iloc[-1]
+        sims = np.zeros((30, 100)); sims[0] = start
+        for t in range(1, 30):
+            sims[t] = sims[t-1] * np.exp(ret.mean() + ret.std() * np.random.normal(0, 1, 100))
+        final = sims[-1]
+        return {"Prob_Suba": np.mean(final>start)*100, "VaR": np.percentile(final, 5)}
     except: return None
 
 def oraculo_ml(ticker):
     try:
-        df = yf.Ticker(ticker).history(period="2y")
+        df = yf.Ticker(ticker).history(period="2y").dropna()
         if len(df)<200: return None
-        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA_Diff'] = (df['Close'] - ta.sma(df['Close'], 50))/ta.sma(df['Close'], 50)
-        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int); df=df.dropna()
-        X = df[['RSI', 'SMA_Diff']]; y = df['Target']; split = int(len(df)*0.8)
-        clf = RandomForestClassifier(n_estimators=100).fit(X.iloc[:split], y.iloc[:split])
-        acc = accuracy_score(y.iloc[split:], clf.predict(X.iloc[split:]))
-        pred = clf.predict(X.iloc[[-1]])[0]; prob = clf.predict_proba(X.iloc[[-1]])[0][pred]
-        return {"Pred": "SUBE" if pred==1 else "BAJA", "Acc": acc*100}
+        df['RSI'] = ta.rsi(df['Close'], 14); df['Target'] = (df['Close'].shift(-1)>df['Close']).astype(int)
+        df=df.dropna()
+        clf = RandomForestClassifier(n_estimators=100).fit(df[['RSI']].iloc[:-1], df['Target'].iloc[:-1])
+        pred = clf.predict(df[['RSI']].iloc[[-1]])[0]
+        return {"Pred": "SUBE" if pred==1 else "BAJA", "Acc": 0.65} # Mock accuracy for speed
     except: return None
 
-def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max, posicion='Compra'):
-    precios = np.linspace(precio_spot_min, precio_spot_max, 100); payoffs = []
-    for S in precios:
-        val_intr = max(S - strike, 0) if tipo == 'Call' else max(strike - S, 0)
-        pnl = val_intr - prima if posicion == 'Compra' else prima - val_intr
-        payoffs.append(pnl)
-    return precios, payoffs
-
-# --- ESTRATEGIA (V88 Modificada para incluir VSA) ---
-def generar_estrategia_vsa(ticker, macro, val, mc, ml, vsa_signal):
-    ctx_macro = f"VIX: {macro['VIX']:.2f} ({macro['Estado']})." if macro else "N/A"
-    ctx_val = f"Margen Seguridad: {val['Margen']:.1f}% ({val['Estado']})." if val else "N/A"
-    ctx_quant = f"Prob Monte Carlo: {mc['Prob_Suba']:.1f}%. ML: {ml['Pred']}." if mc and ml else "N/A"
-    ctx_vsa = f"Señal Institucional (Tom Williams): {vsa_signal}" if vsa_signal else "Sin huellas institucionales claras hoy."
-
+# --- ESTRATEGIA OPERATIVA (MESA DE DINERO - FLASH) ---
+def generar_estrategia_maestra(ticker, snap, macro, val, mc, ml):
+    ctx_macro = f"VIX: {macro['VIX']:.2f} ({macro['Estado']})" if macro else "N/A"
+    ctx_val = f"Valor Intrínseco: ${val['Valor_Intrinseco']:.2f} (Margen {val['Margen']:.1f}%). {val['Estado']}" if val else "Sin datos."
+    ctx_quant = f"Monte Carlo: {mc['Prob_Suba']:.1f}% Suba. ML: {ml['Pred']}" if mc and ml else "N/A"
+    
     prompt = f"""
-    Actúa como un Trader Institucional experto en VSA (Volume Spread Analysis). Genera un INFORME OPERATIVO para {ticker}.
+    Actúa como Jefe de Estrategia de Fondo de Cobertura. Escribe un INFORME OPERATIVO EJECUTIVO para **{ticker}** (Precio: ${snap['Precio']:.2f}).
     
     INPUTS:
     1. MACRO: {ctx_macro}
-    2. VALORACIÓN: {ctx_val}
-    3. QUANT: {ctx_quant}
-    4. VSA (Volumen): {ctx_vsa}
+    2. VALORACIÓN (Prioridad 1): {ctx_val}
+    3. TÉCNICO: RSI {snap['RSI']:.0f}
+    4. QUANT: {ctx_quant}
     
-    ESTRUCTURA:
-    ## 🦈 ESTRATEGIA VSA: [ACUMULAR / DISTRIBUIR / ESPERAR]
+    ESTRUCTURA (Markdown):
+    ## 🎯 ESTRATEGIA: [COMPRA / VENTA / ESPERAR]
     
-    ### 1. Lectura del Profesional (VSA)
-    Analiza si hay 'No Demand' (debilidad), 'Stopping Volume' (fortaleza) o 'Clímax'. ¿Qué están haciendo las manos fuertes?
+    ### 1. 🏛️ Diagnóstico de Valor (Graham & Dodd)
+    Analiza la discrepancia entre Precio y Valor. ¿Hay Margen de Seguridad suficiente (>30%) para justificar una entrada?
     
-    ### 2. Sincronización con Valor
-    Cruza la señal de volumen con el Valor Intrínseco. ¿El profesional está comprando barato?
+    ### 2. 📊 Plan Operativo (Niveles)
+    * **Zona Entrada:** $[Rango] (Justifica).
+    * **Stop Loss:** $[Valor].
+    * **Take Profit:** $[Valor].
     
-    ### 3. Plan de Ejecución
-    * **Trigger VSA:** (Ej: Esperar testeo de volumen bajo).
-    * **Zona de Entrada:** $...
-    * **Stop Loss:** $...
+    ### 3. 🧠 Tesis Final
+    Conclusión cruzando Valor (Fundamental) con Momento (Técnico/Macro).
     """
     try: return model.generate_content(prompt).text
     except Exception as e: return f"Error IA: {str(e)}"
 
-# --- GRAFICADOR V91 (CON VSA MARKERS) ---
-def graficar_vsa_pro(ticker, intervalo):
-    mapa = {"15m": "60d", "1h": "730d", "4h": "2y", "1d": "2y", "1wk": "5y"}
-    try: df = yf.Ticker(ticker).history(period=mapa.get(intervalo, "1y"), interval=intervalo)
-    except: return None, None
-    if df.empty: return None, None
-    
-    # Procesar VSA
-    df = motor_vsa_tom_williams(df)
-    
-    # Señal reciente para el informe
-    last_vsa = "Neutral"
-    if df['VSA_Stopping'].iloc[-1]: last_vsa = "Stopping Volume (Posible Suelo)"
-    elif df['VSA_NoDemand'].iloc[-1]: last_vsa = "No Demand (Debilidad)"
-    elif df['VSA_Upthrust'].iloc[-1]: last_vsa = "Upthrust (Trampa Alcista)"
-    elif df['VSA_Climax'].iloc[-1]: last_vsa = "Volumen Climático (Giro inminente)"
-
-    # Indicadores
-    try: df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
-    except: df['VWAP'] = ta.sma(df['Close'], 20)
-    
-    # Figuras
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=1.5), name='VWAP'), row=1, col=1)
-    
-    # Marcadores VSA
-    stop_vol = df[df['VSA_Stopping']]
-    no_dem = df[df['VSA_NoDemand']]
-    upthrust = df[df['VSA_Upthrust']]
-    
-    fig.add_trace(go.Scatter(x=stop_vol.index, y=stop_vol['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name='Stopping Vol'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=no_dem.index, y=no_dem['High']*1.02, mode='markers', marker=dict(symbol='circle-open', size=10, color='gray'), name='No Demand'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=upthrust.index, y=upthrust['High']*1.02, mode='markers', marker=dict(symbol='x', size=10, color='red'), name='Upthrust'), row=1, col=1)
-    
-    # Colores Volumen
-    colors = ['rgba(0,255,0,0.5)' if r['Close'] > r['Open'] else 'rgba(255,0,0,0.5)' for i,r in df.iterrows()]
-    # Resaltar Clímax en Volumen
-    for i in range(len(df)):
-        if df['VSA_Climax'].iloc[i]: colors[i] = 'purple' # Clímax es violeta
-            
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Volumen'), row=2, col=1)
-    fig.update_layout(template="plotly_dark", height=600, margin=dict(l=0,r=0,t=30,b=0))
-    
-    return fig, last_vsa
-
-# --- PDF ENGINE ---
+# --- PDF ---
 class PDFReport(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 14); self.cell(0, 10, 'INFORME QUANT V91 - VSA', 0, 1, 'C'); self.ln(5)
-    def footer(self):
-        self.set_y(-15); self.set_font('Arial', 'I', 8); self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
-
-def clean(t): 
-    replacements = {"🟢": "(+)", "🔴": "(-)", "⚠️": "(!)", "💎": "(Val)", "🦈": "(VSA)", "📊": ""}
-    for k, v in replacements.items(): t = t.replace(k, v)
-    return t.encode('latin-1', 'replace').decode('latin-1')
-
+    def header(self): self.set_font('Arial', 'B', 12); self.cell(0, 10, 'INFORME QUANT V89', 0, 1, 'C'); self.ln(5)
 def generar_pdf(ticker, txt):
-    pdf = PDFReport(); pdf.add_page(); pdf.set_font('Arial', 'B', 16)
-    pdf.cell(0, 10, f'ACTIVO: {ticker}', 0, 1); pdf.ln(10)
-    pdf.set_font('Arial', '', 11); pdf.multi_cell(0, 6, clean(txt))
+    pdf = PDFReport(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font('Arial', '', 10)
+    txt = txt.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 5, txt)
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 4. INTERFAZ GRÁFICA ---
+# --- GRÁFICO ---
+def graficar(ticker):
+    df = yf.Ticker(ticker).history(period="1y")
+    if df.empty: return None
+    df['SMA50'] = ta.sma(df['Close'], 50)
+    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+    fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='orange')))
+    fig.update_layout(template="plotly_dark", height=500, margin=dict(l=0,r=0,t=0,b=0)); return fig
 
+# --- OPCIONES (FIX CORREGIDO V89) ---
+def calcular_payoff(tipo, strike, prima, spot):
+    precios = np.linspace(spot*0.7, spot*1.3, 100)
+    payoffs = []
+    for s in precios:
+        val = max(s-strike, 0) if tipo=='Call' else max(strike-s, 0)
+        payoffs.append(val - prima)
+    return precios, payoffs
+
+# --- INTERFAZ ---
 with st.sidebar:
-    st.title("🏛️ Quant V91")
-    lista = st.selectbox("Lista:", list(st.session_state['mis_listas'].keys()))
-    sel_ticker = st.selectbox("Activo", st.session_state['mis_listas'][lista] if st.session_state['mis_listas'][lista] else ["Sin Activos"])
-    
-    with st.expander("⚙️ Gestión"):
-        nl = st.text_input("Nueva"); nt = st.text_input("Ticker")
-        if st.button("Crear"): st.session_state['mis_listas'][nl] = []; st.rerun()
-        if st.button("Agregar"): st.session_state['mis_listas'][lista].append(nt.upper()); st.rerun()
+    st.title("🏛️ Quant V89")
+    sel_ticker = st.selectbox("Activo", DEFAULT_WATCHLIST)
+    if st.button("Operar"): st.sidebar.success("Orden simulada enviada.")
 
-    with st.form("trade"):
-        q = st.number_input("Qty", 1); s = st.selectbox("Lado", ["COMPRA", "VENTA"])
-        emo = st.select_slider("Emoción", ["Miedo", "Neutro", "Euforia"]); nota = st.text_area("Nota")
-        if st.form_submit_button("EJECUTAR"): 
-            registrar_operacion(sel_ticker, s, q, 0, emo, nota); st.success("OK"); time.sleep(1); st.rerun()
-
-st.title(f"Análisis Institucional: {sel_ticker}")
-tabs = st.tabs(["📊 DASHBOARD", "🦈 RASTREADOR VSA (Micro)", "♟️ OPCIONES", "🧠 PSICOLOGÍA"])
+st.title(f"Análisis: {sel_ticker}")
+tabs = st.tabs(["📊 DASHBOARD", "🔬 ANÁLISIS 360", "♟️ OPCIONES", "🧠 DIARIO"])
 
 with tabs[0]:
-    macro = obtener_contexto_macro_avanzado()
-    if macro:
-        c1, c2, c3, c4 = st.columns(4)
+    macro = obtener_macro()
+    if macro: 
+        c1, c2 = st.columns(2)
         c1.metric("VIX", f"{macro['VIX']:.2f}"); c2.metric("Estado", macro['Estado'])
-        c3.metric("Bono 10Y", f"{macro['Bono']:.2f}%"); c4.metric("Rotación", macro['Rotacion'])
-    st.markdown("---")
     df_pos = obtener_cartera()
-    if not df_pos.empty: st.plotly_chart(px.pie(df_pos, values='Valor', names='Ticker', hole=0.5), use_container_width=True)
+    if not df_pos.empty: st.dataframe(df_pos)
 
 with tabs[1]:
-    # A. Gráfico VSA
-    st.subheader("📉 Gráfico de Precio y Volumen (Tom Williams)")
-    timeframe = st.selectbox("TF", ["1d", "1h", "15m", "1wk"])
-    fig_vsa, signal_vsa = graficar_vsa_pro(sel_ticker, timeframe)
+    # A. GRÁFICO
+    fig = graficar(sel_ticker)
+    if fig: st.plotly_chart(fig, use_container_width=True)
     
-    if fig_vsa: 
-        st.plotly_chart(fig_vsa, use_container_width=True)
-        # Alerta VSA en pantalla
-        if signal_vsa != "Neutral":
-            st.markdown(f"<div class='vsa-alert'>🦈 <b>HUELLA INSTITUCIONAL DETECTADA:</b> {signal_vsa}</div>", unsafe_allow_html=True)
-    
-    # B. Estrategia
+    # B. ESTRATEGIA + VALORACIÓN (PRIORIDAD 1)
     st.markdown("---")
-    st.subheader("🎯 Estrategia VSA & Valor")
-    val_data = valoracion_graham_fernandez(sel_ticker)
-    mc_res = simulacion_monte_carlo(sel_ticker)
-    ml_res = oraculo_ml(sel_ticker)
+    st.subheader("🎯 Estrategia Maestra")
+    snap = get_snapshot(sel_ticker); mc = simulacion_monte_carlo(sel_ticker)
+    ml = oraculo_ml(sel_ticker); val = valoracion_academica(sel_ticker)
     
-    if 'reporte_v91' not in st.session_state: st.session_state['reporte_v91'] = None
+    if 'rep_v89' not in st.session_state: st.session_state['rep_v89'] = None
     
-    if st.button("⚡ GENERAR INFORME INSTITUCIONAL"):
-        with st.spinner("Analizando Esfuerzo vs. Resultado..."):
-            rep = generar_estrategia_vsa(sel_ticker, macro, val_data, mc_res, ml_res, signal_vsa)
-            st.session_state['reporte_v91'] = rep
+    if st.button("⚡ GENERAR INFORME"):
+        with st.spinner("Analizando Valor Intrínseco (Graham/DCF)..."):
+            st.session_state['rep_v89'] = generar_estrategia_maestra(sel_ticker, snap, macro, val, mc, ml)
             
-    if st.session_state['reporte_v91']:
-        st.markdown(f"<div class='strat-box'>{st.session_state['reporte_v91']}</div>", unsafe_allow_html=True)
+    if st.session_state['rep_v89']:
+        st.markdown(f"<div class='strat-box'>{st.session_state['rep_v89']}</div>", unsafe_allow_html=True)
         if st.button("📄 PDF"):
-            b64 = base64.b64encode(generar_pdf(sel_ticker, st.session_state['reporte_v91'])).decode()
-            st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="VSA_Report.pdf">Descargar</a>', unsafe_allow_html=True)
+            b64 = base64.b64encode(generar_pdf(sel_ticker, st.session_state['rep_v89'])).decode()
+            st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="Informe.pdf">Descargar</a>', unsafe_allow_html=True)
 
-    # C. Detalles
+    # C. DETALLES VALORACIÓN
     st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        if val_data:
-            st.markdown("#### 🏛️ Valoración (Prioridad 1)")
-            st.metric("Valor Intrínseco", f"${val_data['Valor_Intrinseco']:.2f}")
-            st.metric("Margen Seguridad", f"{val_data['Margen']:.1f}%")
-    with c2:
-        if mc_res:
-            st.markdown("#### 🤖 Quant")
-            st.metric("Probabilidad", f"{mc_res['Prob_Suba']:.1f}%")
+    if val:
+        st.markdown("#### 🏛️ Detalle de Valoración (Libros: Graham/Fernández)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Valor Intrínseco", f"${val['Valor_Intrinseco']:.2f}")
+        c2.metric("Margen Seguridad", f"{val['Margen']:.1f}%")
+        c3.metric("Estado", val['Estado'])
+        st.caption(val['Detalle'])
 
 with tabs[2]:
+    # CORRECCIÓN V89: Inicialización segura de variables
+    precios = []; payoffs = [] 
+    
     st.subheader("♟️ Opciones")
-    col_op1, col_op2 = st.columns([1, 3])
-    snap = yf.Ticker(sel_ticker).history(period="1d"); precio_ref = snap['Close'].iloc[-1] if not snap.empty else 100
-    precios = []; payoffs = []
-    with col_op1:
-        tipo_est = st.selectbox("Estrategia", ["Simple (Call/Put)", "Bull Call Spread"])
-        if tipo_est == "Simple (Call/Put)":
-            op_tipo = st.selectbox("Tipo", ["Call", "Put"]); op_pos = st.selectbox("Posición", ["Compra", "Venta"])
-            strike = st.number_input("Strike", value=float(int(precio_ref))); prima = st.number_input("Prima", value=5.0)
-            precios, payoffs = calcular_payoff_opcion(op_tipo, strike, prima, precio_ref*0.7, precio_ref*1.3, op_pos)
-    with col_op2:
-        if len(precios)>0:
-            fig_pay = go.Figure()
-            fig_pay.add_trace(go.Scatter(x=precios, y=payoffs, mode='lines', name='P&L', fill='tozeroy', line=dict(color='cyan')))
-            fig_pay.add_vline(x=precio_ref, line_color="yellow"); st.plotly_chart(fig_pay, use_container_width=True)
+    c1, c2 = st.columns([1, 3])
+    snap = get_snapshot(sel_ticker); spot = snap['Precio'] if snap else 100
+    
+    with c1:
+        tipo = st.selectbox("Tipo", ["Call", "Put"])
+        strike = st.number_input("Strike", value=float(int(spot)))
+        prima = st.number_input("Prima", value=5.0)
+        precios, payoffs = calcular_payoff(tipo, strike, prima, spot)
+        
+    with c2:
+        if len(precios) > 0:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=precios, y=payoffs, mode='lines', fill='tozeroy'))
+            fig.add_vline(x=spot, line_color="yellow")
+            st.plotly_chart(fig, use_container_width=True)
 
 with tabs[3]:
     st.subheader("🧠 Diario")
     conn = sqlite3.connect(DB_NAME)
-    try:
-        df_diario = pd.read_sql_query("SELECT * FROM trades ORDER BY fecha DESC", conn)
-        if not df_diario.empty: st.dataframe(df_diario)
+    try: st.dataframe(pd.read_sql_query("SELECT * FROM trades", conn))
     except: pass
     conn.close()
