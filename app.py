@@ -24,16 +24,17 @@ import base64
 
 # --- 1. CONFIGURACIÓN DEL SISTEMA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V85", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V86", layout="wide", page_icon="🏛️")
 
 st.markdown("""<style>
     .main {background-color: #0e1117;}
     .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
     .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
     .metric-label {font-size: 14px; color: #a0a0a0;}
-    .strat-box {background-color: #111827; border-left: 5px solid #10B981; padding: 20px; border-radius: 5px; margin-top: 10px; font-family: 'Courier New', monospace;}
+    .strat-box {background-color: #0f172a; border: 1px solid #3b82f6; border-left: 5px solid #3b82f6; padding: 25px; border-radius: 8px; margin-top: 15px; font-family: 'Segoe UI', sans-serif; line-height: 1.6;}
+    .macro-card {background-color: #2a1a1a; border: 1px solid #ff4b4b; padding: 10px; border-radius: 5px; text-align: center;}
+    .macro-safe {background-color: #1a2a1a; border: 1px solid #00cc96; padding: 10px; border-radius: 5px; text-align: center;}
     .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
-    .watchlist-box {background-color: #111; padding: 10px; border-radius: 5px; border: 1px solid #333; margin-bottom: 10px;}
 </style>""", unsafe_allow_html=True)
 
 try:
@@ -50,7 +51,7 @@ if 'mis_listas' not in st.session_state:
 if 'lista_activa' not in st.session_state:
     st.session_state['lista_activa'] = "General"
 
-# --- 2. MOTORES DE DATOS (BACKEND) ---
+# --- 2. MOTORES DE DATOS ---
 
 def init_db():
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
@@ -92,8 +93,98 @@ def obtener_cartera():
 
 init_db()
 
-# --- MOTORES DE ANÁLISIS ---
+# --- MOTOR MACROECONÓMICO (NUEVO V86) ---
+@st.cache_data(ttl=1800)
+def obtener_contexto_macro():
+    """Analiza VIX, Bonos y Mercado General"""
+    try:
+        # Descarga de índices clave
+        tickers = ["^VIX", "^TNX", "SPY", "QQQ", "IWM"]
+        data = yf.download(" ".join(tickers), period="5d", progress=False, auto_adjust=True)['Close']
+        
+        vix = data['^VIX'].iloc[-1]
+        bond_10y = data['^TNX'].iloc[-1]
+        spy_trend = (data['SPY'].iloc[-1] > data['SPY'].iloc[0]) # vs hace 5 días
+        
+        # Cálculo Proxy Fear & Greed (Basado en VIX y Momentum SPY)
+        # VIX bajo (<15) + SPY subiendo = Greed
+        # VIX alto (>25) + SPY bajando = Fear
+        fear_greed_score = 50 # Neutral base
+        if vix < 15: fear_greed_score += 20
+        elif vix > 25: fear_greed_score -= 30
+        
+        if spy_trend: fear_greed_score += 10
+        else: fear_greed_score -= 10
+        
+        estado = "NEUTRAL"
+        if fear_greed_score > 60: estado = "CODICIA (Greed) 🟢"
+        elif fear_greed_score < 40: estado = "MIEDO (Fear) 🔴"
+        
+        return {
+            "VIX": vix,
+            "Bono_10Y": bond_10y,
+            "SPY_Price": data['SPY'].iloc[-1],
+            "Fear_Greed_Label": estado,
+            "Fear_Greed_Score": fear_greed_score,
+            "Trend_QQQ": "Alcista" if data['QQQ'].iloc[-1] > data['QQQ'].iloc[-2] else "Bajista"
+        }
+    except: return None
 
+# --- MOTOR FUNDAMENTAL REPARADO & SCORING (V86) ---
+@st.cache_data(ttl=3600)
+def analisis_fundamental_scoring(ticker):
+    """Calcula un Score Fundamental (0-100) combinando ratios y noticias"""
+    if "USD" in ticker: return None
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # 1. Ratios Financieros (Score Base 50)
+        score = 50
+        
+        # Rentabilidad
+        margins = info.get('profitMargins', 0)
+        if margins > 0.20: score += 10
+        elif margins < 0.05: score -= 10
+        
+        # Deuda
+        debt_eq = info.get('debtToEquity', 0)
+        if debt_eq < 50: score += 10 # Poca deuda
+        elif debt_eq > 150: score -= 10 # Mucha deuda
+        
+        # Valuación
+        pe = info.get('trailingPE', 0)
+        if 0 < pe < 25: score += 10
+        elif pe > 50: score -= 5 # Cara
+        
+        # 2. Sentimiento de Noticias (Impacto +/- 10)
+        news_score = 0
+        try:
+            news = stock.news[:3]
+            bull = ['up', 'rise', 'strong', 'profit', 'growth']
+            bear = ['down', 'drop', 'weak', 'loss', 'miss']
+            for n in news:
+                t = n['title'].lower()
+                if any(w in t for w in bull): news_score += 2
+                if any(w in t for w in bear): news_score -= 2
+        except: pass
+        
+        final_score = max(0, min(100, score + news_score))
+        
+        # Diagnóstico
+        calidad = "Alta Calidad 💎" if final_score > 70 else "Especulativa ⚠️" if final_score < 40 else "Promedio ⚖️"
+        
+        return {
+            "Score": final_score,
+            "Calidad": calidad,
+            "Margen_Neto": margins * 100,
+            "Deuda_Eq": debt_eq,
+            "PE_Ratio": pe,
+            "News_Sentiment": news_score
+        }
+    except: return None
+
+# --- MOTORES TÉCNICOS (V83) ---
 def calcular_vsa_color(row):
     if row['Volume'] > row['Vol_SMA'] * 1.5:
         return 'rgba(0, 255, 0, 0.6)' if row['Close'] > row['Open'] else 'rgba(255, 0, 0, 0.6)'
@@ -105,9 +196,10 @@ def detectar_patrones_velas_pro(df):
     df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
     df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
     df['Rango'] = df['High'] - df['Low']; df['Cuerpo_Prom'] = df['Cuerpo'].rolling(10).mean()
-    df['Patron_Marubozu_Bull'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Mecha_Inf'] < 0.05 * df['Rango']) & (df['Close'] > df['Open'])
-    df['Patron_Marubozu_Bear'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Mecha_Inf'] < 0.05 * df['Rango']) & (df['Close'] < df['Open'])
+    df['Patron_Marubozu_Bull'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Close'] > df['Open'])
+    df['Patron_Marubozu_Bear'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Close'] < df['Open'])
     df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & (df['Mecha_Sup'] < 0.3 * df['Cuerpo'])
+    df['Patron_Doji'] = df['Cuerpo'] <= df['Rango'] * 0.1
     df['Patron_BullEng'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Close'] > df['Open'].shift(1)) & (df['Open'] < df['Close'].shift(1))
     return df
 
@@ -127,7 +219,6 @@ def obtener_datos_grafico(ticker, intervalo):
 def graficar_profesional_quant(ticker, intervalo):
     df = obtener_datos_grafico(ticker, intervalo)
     if df is None: return None
-    
     macd = ta.macd(df['Close']); df = pd.concat([df, macd], axis=1)
     df['RSI'] = ta.rsi(df['Close'], 14)
     try: df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
@@ -141,12 +232,10 @@ def graficar_profesional_quant(ticker, intervalo):
     fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=1.5), name='VWAP'), row=1, col=1)
     fig.add_hline(y=df['Resistencia'].iloc[-1], line_dash="dash", line_color="red", row=1, col=1)
     fig.add_hline(y=df['Soporte'].iloc[-1], line_dash="dash", line_color="green", row=1, col=1)
-    
     maru_bull = df[df['Patron_Marubozu_Bull']]; maru_bear = df[df['Patron_Marubozu_Bear']]; hammer = df[df['Patron_Martillo']]
     fig.add_trace(go.Scatter(x=maru_bull.index, y=maru_bull['Low'], mode='markers', marker=dict(symbol='square', size=8, color='blue'), name='Marubozu Alcista'), row=1, col=1)
     fig.add_trace(go.Scatter(x=maru_bear.index, y=maru_bear['High'], mode='markers', marker=dict(symbol='square', size=8, color='purple'), name='Marubozu Bajista'), row=1, col=1)
     fig.add_trace(go.Scatter(x=hammer.index, y=hammer['Low'], mode='markers', marker=dict(symbol='diamond', size=6, color='cyan'), name='Martillo'), row=1, col=1)
-
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors_vsa, name='Volumen VSA'), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], line=dict(color='white', width=1), name='MACD'), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], line=dict(color='orange', width=1), name='Signal'), row=3, col=1)
@@ -155,74 +244,65 @@ def graficar_profesional_quant(ticker, intervalo):
     fig.add_hline(y=70, line_color="red", line_dash="dot", row=4, col=1); fig.add_hline(y=30, line_color="green", line_dash="dot", row=4, col=1)
     fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=30,b=0)); return fig
 
+# --- ESTRATEGIA MAESTRA (IA CONTEXTUAL V86) ---
+def generar_estrategia_maestra(ticker, snap, macro, fund, mc, ml):
+    """Cerebro central: Cruza Macro, Fundamental, Técnico y Probabilístico"""
+    
+    # Contexto Macro
+    if macro:
+        contexto_macro = f"VIX: {macro['VIX']:.2f} | Sentimiento Global: {macro['Fear_Greed_Label']} | Bonos 10Y: {macro['Bono_10Y']:.2f}%"
+    else: contexto_macro = "Datos Macro no disponibles."
+    
+    # Contexto Fundamental
+    if fund:
+        contexto_fund = f"Calidad: {fund['Calidad']} (Score: {fund['Score']}/100) | Margen Neto: {fund['Margen_Neto']:.2f}%"
+    else: contexto_fund = "Datos Fundamentales limitados."
+    
+    # Contexto Probabilístico
+    if mc:
+        contexto_prob = f"Probabilidad Suba (30d): {mc['Prob_Suba']:.1f}% | Riesgo VaR: ${mc['VaR_95']:.2f}"
+    else: contexto_prob = "Simulación pendiente."
+
+    prompt = f"""
+    Actúa como un Portfolio Manager de Fondo de Cobertura. Genera una ESTRATEGIA OPERATIVA PRECISA para {ticker}.
+    
+    1. CONTEXTO MACROECONÓMICO:
+    {contexto_macro}
+    (Si el VIX es alto >25 o hay Miedo Extremo, sé muy cauteloso con las compras).
+    
+    2. ANÁLISIS FUNDAMENTAL (Calidad del Activo):
+    {contexto_fund}
+    
+    3. ANÁLISIS TÉCNICO Y QUANT:
+    - Precio: ${snap['Precio']:.2f} (RSI: {snap['RSI']:.0f})
+    - Oráculo ML: {ml['Pred'] if ml else 'N/A'} (Confianza: {ml['Acc'] if ml else 0:.0f}%)
+    - Monte Carlo: {contexto_prob}
+    
+    ---
+    TU MISIÓN:
+    Escribe un plan de trading ejecutivo en formato Markdown.
+    
+    ### 🚦 DECISIÓN: [COMPRA FUERTE / COMPRA ESPECULATIVA / ESPERAR / VENTA]
+    
+    ### 📊 Niveles Operativos
+    * **Zona de Entrada:** $[Valor] - $[Valor]
+    * **Stop Loss:** $[Valor] (Explicar por qué técnico o volatilidad)
+    * **Take Profit 1:** $[Valor]
+    * **Take Profit 2:** $[Valor]
+    
+    ### 🧠 Tesis del Trade
+    Explica en 3 líneas por qué tomamos este riesgo, cruzando el factor Macro (VIX/Bonos) con la calidad Fundamental y la señal Técnica.
+    """
+    try: return model.generate_content(prompt).text
+    except: return "⚠️ Error de conexión con el Estratega IA."
+
+# --- MOTORES SOPORTE ---
 @st.cache_data(ttl=900)
 def get_snapshot(ticker):
     try:
         stock = yf.Ticker(ticker); hist = stock.history(period="5d")
         if hist.empty: return None
         return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50}
-    except: return None
-
-# --- MOTOR FUNDAMENTAL REPARADO (V85) ---
-@st.cache_data(ttl=3600)
-def obtener_fundamentales_premium(ticker):
-    if "USD" in ticker: return None
-    try:
-        stock = yf.Ticker(ticker)
-        # Intento primario: Tablas
-        try:
-            inc = stock.income_stmt.T.sort_index(); bal = stock.balance_sheet.T.sort_index()
-            use_tables = not inc.empty and not bal.empty
-        except: use_tables = False
-        
-        # Intento secundario: Info Dict (Más robusto)
-        info = stock.info
-        
-        if use_tables:
-            gm = (inc['Gross Profit']/inc['Total Revenue'])*100; nm = (inc['Net Income']/inc['Total Revenue'])*100
-            cr = bal['Total Current Assets'].iloc[-1]/bal['Total Current Liabilities'].iloc[-1]
-            de = bal.get('Total Debt', pd.Series(0)).iloc[-1]/bal['Stockholders Equity'].iloc[-1]
-            fechas = inc.index.strftime('%Y')
-        else:
-            # Fallback a datos estáticos si fallan las tablas
-            gm = info.get('grossMargins', 0) * 100
-            nm = info.get('profitMargins', 0) * 100
-            cr = info.get('currentRatio', 0)
-            de = info.get('debtToEquity', 0) / 100
-            fechas = ["Actual"]
-            
-        return {"Fechas": fechas, "Margen_Bruto": gm, "Margen_Neto": nm, "Current": cr, "Debt": de}
-    except: return None
-
-# --- MOTOR INSIDER REPARADO (V85) ---
-@st.cache_data(ttl=3600)
-def obtener_datos_insider(ticker):
-    if "USD" in ticker: return None
-    try:
-        info = yf.Ticker(ticker).info
-        # Extracción directa del diccionario info (Más fiable que holders)
-        inst_pct = info.get('heldPercentInstitutions', 0) * 100
-        insider_pct = info.get('heldPercentInsiders', 0) * 100
-        short_ratio = info.get('shortRatio', 0)
-        
-        return {"Institucional": inst_pct, "Insiders": insider_pct, "Short_Ratio": short_ratio}
-    except: return None
-
-# --- MOTOR SENTIMIENTO (RECUPERADO V80) ---
-def analizar_sentimiento_noticias(ticker):
-    if "USD" in ticker: return None
-    try:
-        news = yf.Ticker(ticker).news[:5]
-        if not news: return None
-        score = 0; bull = ['up', 'rise', 'growth', 'buy', 'strong', 'beat']; bear = ['down', 'drop', 'loss', 'sell', 'weak', 'miss']
-        titles = []
-        for n in news:
-            t = n['title'].lower()
-            titles.append(n['title'])
-            if any(w in t for w in bull): score += 1
-            if any(w in t for w in bear): score -= 1
-        label = "Positivo 🟢" if score > 0 else "Negativo 🔴" if score < 0 else "Neutral ⚪"
-        return {"Score": score, "Label": label, "Titulos": titles}
     except: return None
 
 def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
@@ -236,17 +316,6 @@ def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
             sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
         final = sim_paths[-1]
         return {"Paths": sim_paths, "Dates": [data.index[-1]+timedelta(days=i) for i in range(dias)], "Mean_Price": np.mean(final), "Prob_Suba": np.mean(final>start_price)*100, "VaR_95": np.percentile(final, 5)}
-    except: return None
-
-def calcular_dcf_rapido(ticker):
-    if "USD" in ticker: return None
-    try:
-        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
-        if fcf <= 0: return None
-        pv = 0; g=0.1; w=0.09
-        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
-        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
-        return (pv + pv_term) / i.get('sharesOutstanding', 1)
     except: return None
 
 def oraculo_ml(ticker):
@@ -263,6 +332,14 @@ def oraculo_ml(ticker):
         return {"Pred": "SUBE 🟢" if pred==1 else "BAJA 🔴", "Acc": acc*100, "Prob": prob*100}
     except: return None
 
+@st.cache_data(ttl=3600)
+def obtener_datos_insider(ticker):
+    if "USD" in ticker: return None
+    try:
+        info = yf.Ticker(ticker).info
+        return {"Institucional": info.get('heldPercentInstitutions', 0)*100, "Short_Float": (info.get('sharesShort', 0)/info.get('floatShares', 1))*100}
+    except: return None
+
 def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max, posicion='Compra'):
     precios = np.linspace(precio_spot_min, precio_spot_max, 100); payoffs = []
     for S in precios:
@@ -270,37 +347,6 @@ def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max
         pnl = val_intr - prima if posicion == 'Compra' else prima - val_intr
         payoffs.append(pnl)
     return precios, payoffs
-
-# --- MOTOR ESTRATEGIA OPERATIVA IA (NUEVO V85) ---
-def generar_estrategia_operativa_ia(ticker, snap, ml, mc, fund, sent):
-    """Genera el plan operativo final usando todos los recursos"""
-    
-    # Preparar el contexto rico para la IA
-    contexto = f"""
-    ACTIVO: {ticker} | PRECIO: ${snap['Precio']:.2f}
-    
-    1. TÉCNICO: RSI {snap['RSI']:.0f}, Tendencia {'Alcista' if snap['Precio'] > snap['Previo'] else 'Bajista'}
-    2. ML ORÁCULO: Predice {ml['Pred'] if ml else 'N/A'} (Confianza {ml['Acc'] if ml else 0:.0f}%)
-    3. PROBABILIDAD (Monte Carlo): Suba {mc['Prob_Suba'] if mc else 0:.0f}%
-    4. FUNDAMENTAL: Liquidez {fund['Current'] if fund else 0:.2f}, Deuda {fund['Debt'] if fund else 0:.2f}
-    5. SENTIMIENTO (Noticias): {sent['Label'] if sent else 'Neutral'}
-    
-    TAREA: Actúa como un Jefe de Mesa de Dinero. Basado en estos datos, genera una ESTRATEGIA OPERATIVA PRECISA.
-    
-    FORMATO DE SALIDA (Estricto):
-    ### 🎯 ESTRATEGIA: [COMPRA / VENTA / ESPERAR]
-    
-    **Rango de Entrada Ideal:** $[Valor] - $[Valor]
-    **Stop Loss (Técnico):** $[Valor] (Justificación breve)
-    **Take Profit 1 (Conservador):** $[Valor]
-    **Take Profit 2 (Agresivo):** $[Valor]
-    
-    **Análisis de Situación:**
-    Resumen conciso de por qué tomamos esta decisión uniendo los factores técnicos, fundamentales y de sentimiento.
-    """
-    
-    try: return model.generate_content(contexto).text
-    except: return "⚠️ Error conectando con el Estratega IA."
 
 def scanner_mercado(tickers):
     ranking = []
@@ -321,25 +367,20 @@ def scanner_mercado(tickers):
 
 # SIDEBAR
 with st.sidebar:
-    st.title("🏛️ Prof. Quant V85")
-    
-    st.markdown("### 📂 Listas")
-    lista_actual = st.selectbox("Ver:", list(st.session_state['mis_listas'].keys()), index=0)
-    st.session_state['lista_activa'] = lista_actual
+    st.title("🏛️ Prof. Quant V86")
+    lista_actual = st.selectbox("Lista:", list(st.session_state['mis_listas'].keys()), index=0)
     activos_lista = st.session_state['mis_listas'][lista_actual]
-    sel_ticker = st.selectbox("🔍 Activo", activos_lista if activos_lista else ["Sin Activos"])
+    sel_ticker = st.selectbox("Activo", activos_lista if activos_lista else ["Sin Activos"])
     
-    with st.expander("⚙️ Gestionar"):
-        nueva_lista = st.text_input("Nueva Lista"); nuevo_ticker = st.text_input("Ticker")
-        if st.button("Crear Lista"): 
-            if nueva_lista and nueva_lista not in st.session_state['mis_listas']: st.session_state['mis_listas'][nueva_lista] = []; st.rerun()
-        if st.button("Agregar"): 
-            if nuevo_ticker and nuevo_ticker not in st.session_state['mis_listas'][lista_actual]: st.session_state['mis_listas'][lista_actual].append(nuevo_ticker.upper()); st.rerun()
+    with st.expander("⚙️ Listas"):
+        nl = st.text_input("Nueva"); nt = st.text_input("Ticker")
+        if st.button("Crear") and nl: st.session_state['mis_listas'][nl] = []; st.rerun()
+        if st.button("Agregar") and nt: st.session_state['mis_listas'][lista_actual].append(nt.upper()); st.rerun()
 
     st.markdown("### 🧠 Operativa")
     with st.form("trade"):
-        q = st.number_input("Cant", 1, 1000, 10); s = st.selectbox("Lado", ["COMPRA", "VENTA"])
-        emo = st.select_slider("Emoción", options=["Miedo", "Neutro", "Euforia"]); nota = st.text_area("Nota")
+        q = st.number_input("Qty", 1); s = st.selectbox("Lado", ["COMPRA", "VENTA"])
+        emo = st.select_slider("Emoción", ["Miedo", "Neutro", "Euforia"]); nota = st.text_area("Nota")
         if st.form_submit_button("EJECUTAR"): 
             snap = get_snapshot(sel_ticker)
             if snap: registrar_operacion(sel_ticker, s, q, snap['Precio'], emo, nota); st.success("OK"); time.sleep(1); st.rerun()
@@ -347,88 +388,91 @@ with st.sidebar:
 # MAIN
 st.title(f"Análisis: {sel_ticker}")
 
-tabs = st.tabs(["📊 DASHBOARD", "🔬 ANÁLISIS 360", "♟️ OPCIONES", "🧠 PSICOLOGÍA"])
+tabs = st.tabs(["📊 DASHBOARD", "🔬 ANÁLISIS 360 (MASTER)", "♟️ OPCIONES", "🧠 PSICOLOGÍA"])
 
 # --- TAB 1: DASHBOARD ---
 with tabs[0]:
     st.subheader("🌍 Resumen Ejecutivo")
+    macro = obtener_contexto_macro()
+    if macro:
+        c1, c2, c3, c4 = st.columns(4)
+        vix_color = "risk-alert" if macro['VIX'] > 20 else "risk-safe"
+        c1.markdown(f"<div class='{vix_color}'>VIX (Miedo)<br><b>{macro['VIX']:.2f}</b></div>", unsafe_allow_html=True)
+        c2.metric("Sentimiento Global", macro['Fear_Greed_Label'])
+        c3.metric("Bonos 10Y", f"{macro['Bono_10Y']:.2f}%")
+        c4.metric("Tendencia QQQ", macro['Trend_QQQ'])
+    
+    st.markdown("---")
     df_pos = obtener_cartera(); ranking = scanner_mercado(DEFAULT_WATCHLIST)
-    patrimonio = df_pos['Valor'].sum() if not df_pos.empty else 0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Patrimonio", f"${patrimonio:,.2f}")
-    if not ranking.empty: c2.metric("Top Oportunidad", ranking.iloc[0]['Ticker'])
-    spy = get_snapshot("SPY")
-    if spy: c3.metric("S&P 500", f"{((spy['Precio']-spy['Previo'])/spy['Previo'])*100:+.2f}%")
-    st.dataframe(ranking.head(5), use_container_width=True)
+    kc1, kc2 = st.columns([1, 2])
+    with kc1: 
+        if not df_pos.empty: st.plotly_chart(px.pie(df_pos, values='Valor', names='Ticker', hole=0.5, title="Cartera"), use_container_width=True)
+        else: st.info("Cartera vacía.")
+    with kc2: st.dataframe(ranking.head(5), use_container_width=True)
 
-# --- TAB 2: ANÁLISIS 360 (NUEVO DISEÑO V85) ---
+# --- TAB 2: ANÁLISIS 360 (MASTER STRATEGIST) ---
 with tabs[1]:
-    # 1. GRÁFICO TÉCNICO (Arriba)
-    st.subheader("📉 Visión Técnica")
-    c_tf, c_rest = st.columns([1, 5])
-    timeframe = c_tf.selectbox("Timeframe", ["1d", "15m", "1h", "4h", "1wk"], index=0)
+    # 1. VISUALIZACIÓN TÉCNICA
+    st.subheader("📉 Visión Técnica Profesional")
+    timeframe = st.selectbox("Timeframe", ["1d", "15m", "1h", "4h", "1wk"], index=0)
     if sel_ticker != "Sin Activos":
         fig = graficar_profesional_quant(sel_ticker, timeframe)
         if fig: st.plotly_chart(fig, use_container_width=True, height=700)
 
-    # 2. ESTRATEGIA OPERATIVA (Centro)
+    # 2. ESTRATEGIA OPERATIVA INTEGRAL (V86)
     st.markdown("---")
-    st.subheader("🎯 Estrategia Operativa (IA)")
+    st.subheader("🎯 Estrategia Operativa Maestra (IA + Macro + Micro)")
     
-    # Pre-cálculos para la estrategia
+    # Pre-cálculos invisibles
     snap = get_snapshot(sel_ticker)
     ml_res = oraculo_ml(sel_ticker)
     mc_res = simulacion_monte_carlo(sel_ticker)
-    fund_res = obtener_fundamentales_premium(sel_ticker)
-    sent_res = analizar_sentimiento_noticias(sel_ticker)
+    fund_res = analisis_fundamental_scoring(sel_ticker) # Nuevo Motor Fundamental V86
     
-    if st.button("⚡ GENERAR PLAN DE TRADING"):
-        if snap:
-            with st.spinner("Sintetizando datos técnicos, fundamentales y de sentimiento..."):
-                estrategia = generar_estrategia_operativa_ia(sel_ticker, snap, ml_res, mc_res, fund_res, sent_res)
+    # Botón Maestro
+    if st.button("⚡ GENERAR PLAN DE TRADING OFICIAL"):
+        if snap and macro:
+            with st.spinner("La IA está cruzando datos Macro, Fundamentales y Técnicos..."):
+                estrategia = generar_estrategia_maestra(sel_ticker, snap, macro, fund_res, mc_res, ml_res)
                 st.markdown(f"<div class='strat-box'>{estrategia}</div>", unsafe_allow_html=True)
-        else: st.error("Datos no disponibles.")
+        else: st.error("Datos insuficientes para generar estrategia (Verifique conexión o ticker).")
 
-    # 3. RECURSOS DETALLADOS (Abajo)
+    # 3. DATOS DUROS (SUB-PESTAÑAS)
     st.markdown("---")
-    subtabs = st.tabs(["🤖 Oráculo ML", "📚 Fundamentales", "🦈 Insider", "📰 Sentimiento"])
+    subtabs = st.tabs(["📊 Fundamentales & Score", "🤖 Oráculo ML", "🔮 Monte Carlo", "🦈 Insider"])
     
-    with subtabs[0]:
-        if ml_res:
-            c1, c2 = st.columns(2)
-            c1.metric("Predicción ML", ml_res['Pred'])
-            c2.metric("Confianza", f"{ml_res['Acc']:.1f}%")
-        else: st.warning("ML necesita más datos.")
-        
-    with subtabs[1]:
+    with subtabs[0]: # Fundamental Scoring V86
         if fund_res:
             c1, c2, c3 = st.columns(3)
-            # Manejo seguro de tipos de datos para visualización
-            margen_neto = fund_res['Margen_Neto']
-            if isinstance(margen_neto, pd.Series): margen_neto = margen_neto.iloc[-1]
-            
-            c1.metric("Margen Neto", f"{margen_neto:.2f}%")
-            c2.metric("Liquidez", f"{fund_res['Current']:.2f}")
-            c3.metric("Deuda/Patrimonio", f"{fund_res['Debt']:.2f}")
-        else: st.warning("Fundamentales no disponibles.")
+            color_q = "green" if fund_res['Score'] > 60 else "red"
+            c1.markdown(f"#### Score Calidad: :{color_q}[{fund_res['Score']}/100]")
+            c1.caption(f"Diagnóstico: {fund_res['Calidad']}")
+            c2.metric("Margen Neto", f"{fund_res['Margen_Neto']:.2f}%")
+            c3.metric("Deuda/Patrimonio", f"{fund_res['Deuda_Eq']:.2f}")
+        else: st.warning("No aplica a este activo.")
         
-    with subtabs[2]:
+    with subtabs[1]: # ML
+        if ml_res:
+            c1, c2 = st.columns(2)
+            c1.metric("Predicción IA", ml_res['Pred'])
+            c2.metric("Confianza", f"{ml_res['Acc']:.1f}%")
+            
+    with subtabs[2]: # Monte Carlo
+        if mc_res:
+            st.metric("Probabilidad Suba (30d)", f"{mc_res['Prob_Suba']:.1f}%")
+            fig_mc = go.Figure()
+            for i in range(20): fig_mc.add_trace(go.Scatter(x=mc_res['Dates'], y=mc_res['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
+            fig_mc.add_trace(go.Scatter(x=mc_res['Dates'], y=np.mean(mc_res['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
+            st.plotly_chart(fig_mc, use_container_width=True)
+            
+    with subtabs[3]: # Insider
         insider = obtener_datos_insider(sel_ticker)
         if insider:
-            c1, c2 = st.columns(2)
-            c1.metric("Institucional", f"{insider['Institucional']:.2f}%")
-            c2.metric("Short Ratio", f"{insider['Short_Ratio']:.2f}")
-        else: st.warning("Datos Insider no disponibles.")
-        
-    with subtabs[3]:
-        if sent_res:
-            st.metric("Sentimiento Noticias", sent_res['Label'])
-            for t in sent_res['Titulos']: st.caption(f"• {t}")
-        else: st.warning("Sin noticias recientes.")
+            c1, c2 = st.columns(2); c1.metric("Institucional", f"{insider['Institucional']:.1f}%"); c2.metric("Shorts", f"{insider['Short_Float']:.2f}%")
 
 # --- TAB 3: OPCIONES ---
 with tabs[2]:
-    st.subheader("♟️ Laboratorio")
+    st.subheader("♟️ Laboratorio Derivados")
     col_op1, col_op2 = st.columns([1, 3])
     snap = get_snapshot(sel_ticker); precio_ref = snap['Precio'] if snap else 100
     with col_op1:
@@ -444,7 +488,7 @@ with tabs[2]:
 
 # --- TAB 4: PSICOLOGÍA ---
 with tabs[3]:
-    st.subheader("🧠 Diario")
+    st.subheader("🧠 Diario Emocional")
     conn = sqlite3.connect(DB_NAME)
     try:
         df_diario = pd.read_sql_query("SELECT * FROM trades ORDER BY fecha DESC", conn)
