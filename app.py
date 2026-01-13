@@ -19,14 +19,11 @@ import google.generativeai as genai
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V65 (Consensus)", layout="wide", page_icon="👥")
+st.set_page_config(page_title="Sistema Quant V66 (The Chronos)", layout="wide", page_icon="⏳")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .consensus-card {background-color: #1e2a38; border: 1px solid #2196F3; border-radius: 8px; padding: 15px; text-align: center;}
-    .rec-buy {color: #00ff00; font-weight: bold;}
-    .rec-hold {color: #ffa500; font-weight: bold;}
-    .rec-sell {color: #ff0000; font-weight: bold;}
+    .season-card {background-color: #1a1a2e; border: 1px solid #FFD700; border-radius: 8px; padding: 15px; text-align: center;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -80,45 +77,56 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE CONSENSO (NUEVO V65) ---
+# --- MOTOR DE ESTACIONALIDAD (NUEVO V66) ---
 @st.cache_data(ttl=3600)
-def obtener_consenso_analistas(ticker):
-    """Extrae recomendaciones y precios objetivos de analistas"""
-    if "USD" in ticker and "BTC" not in ticker: return None # Filtro básico para cryptos no principales
-    
+def analizar_estacionalidad(ticker):
+    """Analiza patrones mensuales y semanales históricos"""
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        # Descargamos 10 años de historia
+        df = yf.Ticker(ticker).history(period="10y", auto_adjust=True)
+        if df.empty: return None
         
-        # 1. Recomendación (1-5)
-        # 1=Strong Buy, 2=Buy, 3=Hold, 4=Sell, 5=Strong Sell
-        rec_mean = info.get('recommendationMean')
-        rec_key = info.get('recommendationKey', 'none').upper().replace('_', ' ')
+        # Calcular retornos
+        df['Retorno'] = df['Close'].pct_change()
+        df['Año'] = df.index.year
+        df['Mes'] = df.index.month_name().str[:3] # Jan, Feb...
+        df['Mes_Num'] = df.index.month
+        df['Dia'] = df.index.day_name()
         
-        # 2. Precios Objetivo
-        target_low = info.get('targetLowPrice')
-        target_mean = info.get('targetMeanPrice')
-        target_high = info.get('targetHighPrice')
-        current = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+        # 1. Matriz Mensual (Heatmap Data)
+        pivot_monthly = df.groupby(['Año', 'Mes_Num'])['Retorno'].apply(lambda x: (1 + x).prod() - 1).unstack() * 100
+        # Reordenar columnas y renombrar a texto
+        meses_orden = {1:'Ene', 2:'Feb', 3:'Mar', 4:'Abr', 5:'May', 6:'Jun', 7:'Jul', 8:'Ago', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dic'}
+        pivot_monthly = pivot_monthly.rename(columns=meses_orden)
         
-        if not target_mean or not current: return None
+        # 2. Promedio por Mes (Seasonality Plot)
+        avg_monthly = df.groupby('Mes_Num')['Retorno'].mean() * 100 * 21 # Aprox mensual
+        avg_monthly.index = [meses_orden[i] for i in avg_monthly.index]
         
-        upside = ((target_mean - current) / current) * 100
-        num_analysts = info.get('numberOfAnalystOpinions', 0)
+        # 3. Mejor Mes y Peor Mes
+        best_month = avg_monthly.idxmax()
+        worst_month = avg_monthly.idxmin()
         
         return {
-            "Recomendación": rec_key,
-            "Score": rec_mean,
-            "Target Low": target_low,
-            "Target Mean": target_mean,
-            "Target High": target_high,
-            "Precio Actual": current,
-            "Upside %": upside,
-            "Analistas": num_analysts
+            "Heatmap": pivot_monthly,
+            "Avg_Seasonality": avg_monthly,
+            "Best_Month": best_month,
+            "Worst_Month": worst_month,
+            "Win_Rate": (avg_monthly > 0).mean() * 100
         }
     except: return None
 
-# --- MOTORES DE SOPORTE ---
+# --- MOTORES EXISTENTES ---
+def obtener_consenso_analistas(ticker):
+    if "USD" in ticker: return None
+    try:
+        info = yf.Ticker(ticker).info
+        rec = info.get('recommendationKey', 'none').upper().replace('_', ' ')
+        tm = info.get('targetMeanPrice'); cur = info.get('currentPrice')
+        if not tm or not cur: return None
+        return {"Recomendación": rec, "Score": info.get('recommendationMean'), "Target Mean": tm, "Precio Actual": cur, "Upside %": ((tm-cur)/cur)*100}
+    except: return None
+
 @st.cache_data(ttl=900)
 def escanear_mercado_completo(tickers):
     ranking = []
@@ -161,15 +169,12 @@ def graficar_simple(ticker):
 
 def calcular_dcf_rapido(ticker):
     try:
-        i = yf.Ticker(ticker).info
-        fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
+        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
         if fcf <= 0: return None
-        growth = 0.10; wacc = 0.09; shares = i.get('sharesOutstanding', 1)
-        pv = 0
-        for y in range(1, 6): pv += (fcf * ((1+growth)**y)) / ((1+wacc)**y)
-        term = (fcf * ((1+growth)**5) * 1.02) / (wacc - 0.02); pv_term = term / ((1+wacc)**5)
-        val = (pv + pv_term) / shares
-        return val
+        pv = 0; g=0.1; w=0.09
+        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
+        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
+        return (pv + pv_term) / i.get('sharesOutstanding', 1)
     except: return None
 
 @st.cache_data(ttl=600)
@@ -189,20 +194,20 @@ def calcular_factores_quant_single(ticker):
         return {"Value": score_value, "Growth": score_growth, "Momentum": score_mom, "Quality": score_qual, "Low Vol": score_vol}
     except: return None
 
-# --- INTERFAZ V65 ---
+# --- INTERFAZ V66 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("🖥️ Quant Terminal V65")
+with c1: st.title("⏳ Quant Terminal V66")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
 stock = yf.Ticker(sel_ticker); hist = stock.history(period="2d"); info = stock.info
 if not hist.empty:
-    curr = hist['Close'].iloc[-1]; prev = hist['Close'].iloc[-2]; delta = ((curr - prev) / prev) * 100
-    col_k1, col_k2, col_k3, col_k4, col_k5 = st.columns(5)
-    col_k1.metric("Precio", f"${curr:.2f}", f"{delta:+.2f}%")
-    col_k2.metric("RSI (14)", f"{ta.rsi(stock.history(period='30d')['Close'], 14).iloc[-1]:.0f}")
-    col_k3.metric("Volumen", f"{info.get('volume', 0)/1e6:.1f}M")
-    col_k4.metric("Beta", f"{info.get('beta', 1.0):.2f}")
-    col_k5.metric("Target (Consenso)", f"${info.get('targetMeanPrice', 0):.2f}")
+    curr = hist['Close'].iloc[-1]; delta = ((curr - hist['Close'].iloc[-2])/hist['Close'].iloc[-2])*100
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Precio", f"${curr:.2f}", f"{delta:+.2f}%")
+    k2.metric("RSI", f"{ta.rsi(stock.history(period='30d')['Close'], 14).iloc[-1]:.0f}")
+    k3.metric("Vol", f"{info.get('volume',0)/1e6:.1f}M")
+    k4.metric("Beta", f"{info.get('beta',1.0):.2f}")
+    k5.metric("Target", f"${info.get('targetMeanPrice',0):.2f}")
 
 st.divider()
 
@@ -213,71 +218,84 @@ with col_main:
     fig_chart = graficar_simple(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    # TABS DETALLE (V65)
-    tabs_detail = st.tabs(["👥 Consenso", "🧮 Valuación (DCF)", "📰 Noticias"])
+    # TABS DETALLE (V66: AÑADIDA ESTACIONALIDAD)
+    tabs_detail = st.tabs(["📅 Ciclos & Estacionalidad", "👥 Consenso", "🧮 Valuación", "📰 Noticias"])
     
-    # 1. CONSENSO ANALISTAS (NUEVO V65)
+    # 1. ESTACIONALIDAD (NUEVO V66)
     with tabs_detail[0]:
-        cons = obtener_consenso_analistas(sel_ticker)
-        if cons:
-            c_c1, c_c2 = st.columns([1, 2])
+        st.subheader("⏳ Máquina del Tiempo (Historia 10 Años)")
+        with st.spinner("Analizando patrones históricos..."):
+            season_data = analizar_estacionalidad(sel_ticker)
             
-            with c_c1:
-                rec_text = cons['Recomendación']
-                color_rec = "rec-buy" if "BUY" in rec_text else "rec-sell" if "SELL" in rec_text else "rec-hold"
+            if season_data:
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    st.markdown(f"""
+                    <div class='season-card'>
+                        <h4>Mejor Mes Histórico</h4>
+                        <h2 style='color: #00ff00'>{season_data['Best_Month']}</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with sc2:
+                    st.markdown(f"""
+                    <div class='season-card'>
+                        <h4>Peor Mes Histórico</h4>
+                        <h2 style='color: #ff4b4b'>{season_data['Worst_Month']}</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                st.markdown(f"""
-                <div class='consensus-card'>
-                    <h4 style='color:#ccc'>Recomendación</h4>
-                    <h2 class='{color_rec}'>{rec_text}</h2>
-                    <p>Score: {cons['Score']:.1f} (1=Buy, 5=Sell)</p>
-                    <small>Basado en {cons['Analistas']} Analistas</small>
-                </div>
-                """, unsafe_allow_html=True)
+                # Gráfico de Tendencia Anual Promedio
+                st.markdown("#### 📅 Comportamiento Promedio Anual")
+                fig_season = px.bar(
+                    x=season_data['Avg_Seasonality'].index, 
+                    y=season_data['Avg_Seasonality'].values,
+                    color=season_data['Avg_Seasonality'].values,
+                    color_continuous_scale="RdYlGn",
+                    title="Retorno Promedio por Mes (%)"
+                )
+                st.plotly_chart(fig_season, use_container_width=True)
                 
-            with c_c2:
-                # Gráfico de Target Price
-                fig_target = go.Figure()
-                # Precio actual
-                fig_target.add_trace(go.Scatter(x=[1], y=[cons['Precio Actual']], mode='markers+text', marker=dict(size=15, color='white'), text=["Actual"], textposition="bottom center", name="Actual"))
-                # Rangos
-                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target Low']], name='Low', marker_color='red', opacity=0.3))
-                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target Mean'] - cons['Target Low']], base=cons['Target Low'], name='Mean', marker_color='yellow', opacity=0.3))
-                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target High'] - cons['Target Mean']], base=cons['Target Mean'], name='High', marker_color='green', opacity=0.3))
-                
-                fig_target.update_layout(title=f"Objetivos de Precio (Upside: {cons['Upside %']:.1f}%)", barmode='stack', showlegend=False, xaxis=dict(visible=False), paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=200, margin=dict(l=10, r=10, t=30, b=10))
-                st.plotly_chart(fig_target, use_container_width=True)
-        else:
-            st.info("Datos de consenso no disponibles para este activo.")
+                # Heatmap Completo
+                with st.expander("Ver Mapa de Calor Detallado (Año x Mes)"):
+                    fig_heat = px.imshow(season_data['Heatmap'], 
+                                         color_continuous_scale="RdYlGn", 
+                                         text_auto=".1f", aspect="auto", zmin=-10, zmax=10)
+                    st.plotly_chart(fig_heat, use_container_width=True)
+            else:
+                st.warning("Datos históricos insuficientes para análisis estacional.")
 
     with tabs_detail[1]:
-        dcf_val = calcular_dcf_rapido(sel_ticker)
-        if dcf_val: st.metric("Valor Intrínseco (Modelo DCF)", f"${dcf_val:.2f}", f"{((dcf_val-curr)/curr)*100:+.1f}% Upside")
+        cons = obtener_consenso_analistas(sel_ticker)
+        if cons:
+            c1, c2 = st.columns([1, 2])
+            c1.markdown(f"<div style='text-align:center; padding:10px; background:#222; border-radius:10px;'><h2>{cons['Recomendación']}</h2><p>Upside: {cons['Upside %']:.1f}%</p></div>", unsafe_allow_html=True)
+            fig_t = go.Figure()
+            fig_t.add_trace(go.Bar(x=[1], y=[cons['Target High']], name='High', marker_color='green', opacity=0.3))
+            fig_t.add_trace(go.Bar(x=[1], y=[cons['Target Mean']], name='Mean', marker_color='yellow', opacity=0.8))
+            fig_t.add_trace(go.Scatter(x=[1], y=[cons['Precio Actual']], mode='markers+text', marker=dict(size=15, color='white'), text=["Actual"], name="Actual"))
+            fig_t.update_layout(height=200, showlegend=False, barmode='overlay', paper_bgcolor="#0e1117", font={'color':'white'}); st.plotly_chart(fig_t, use_container_width=True)
+        else: st.info("Sin consenso.")
+
+    with tabs_detail[2]:
+        dcf = calcular_dcf_rapido(sel_ticker)
+        if dcf: st.metric("Valor Justo DCF", f"${dcf:.2f}", f"{((dcf-curr)/curr)*100:+.1f}%")
         else: st.warning("DCF no aplica.")
         
-    with tabs_detail[2]:
+    with tabs_detail[3]:
         if st.button("🤖 Analizar Noticias"):
-            with st.spinner("Leyendo..."):
-                try: st.write(model.generate_content(f"Analisis breve de {sel_ticker} hoy").text)
-                except: st.error("Sin conexión IA")
+            try: st.write(model.generate_content(f"Analisis {sel_ticker} hoy").text)
+            except: st.error("Sin IA")
 
 with col_side:
     st.subheader("🧬 Perfil Quant")
     factores = calcular_factores_quant_single(sel_ticker)
-    if factores:
-        st.plotly_chart(dibujar_radar_factores(factores), use_container_width=True)
-        st.write(f"**💎 Quality:** {factores['Quality']}")
-        st.write(f"**🚀 Momentum:** {factores['Momentum']}")
-        st.write(f"**🏷️ Value:** {factores['Value']}")
-    
+    if factores: st.plotly_chart(dibujar_radar_factores(factores), use_container_width=True)
     st.markdown("---")
     st.subheader("⚡ Quick Trade")
     with st.form("quick_order"):
         q_qty = st.number_input("Cantidad", 1, 1000, 10); q_side = st.selectbox("Lado", ["COMPRA", "VENTA"])
-        if st.form_submit_button("EJECUTAR"):
-            registrar_operacion_sql(sel_ticker, q_side, q_qty, curr); st.success("Orden Enviada!")
+        if st.form_submit_button("EJECUTAR"): registrar_operacion_sql(sel_ticker, q_side, q_qty, curr); st.success("Orden Enviada!")
 
 st.markdown("---")
 st.subheader("🏆 Ranking de Mercado")
-if st.button("🔄 ESCANEAR"):
-    st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
+if st.button("🔄 ESCANEAR"): st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
