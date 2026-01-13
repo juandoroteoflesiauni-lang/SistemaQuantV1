@@ -49,7 +49,10 @@ except: pass
 
 # Base de datos y Listas Default
 DB_NAME = "quant_database.db"
-DEFAULT_WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
+
+# CORRECCIÓN: Definimos WATCHLIST explícitamente para evitar el NameError
+WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
+DEFAULT_WATCHLIST = WATCHLIST # Alias para el gestor de listas
 
 if 'mis_listas' not in st.session_state:
     st.session_state['mis_listas'] = {"General": DEFAULT_WATCHLIST, "Vigiladas": [], "Cartera": []}
