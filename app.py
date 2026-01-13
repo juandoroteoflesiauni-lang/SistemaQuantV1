@@ -20,11 +20,13 @@ import google.generativeai as genai
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V67 (The Forecaster)", layout="wide", page_icon="🔮")
+st.set_page_config(page_title="Sistema Quant V68 (Thesis)", layout="wide", page_icon="📝")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .forecast-card {background-color: #1a1a2e; border: 1px solid #7b2cbf; border-radius: 8px; padding: 15px; text-align: center;}
+    .thesis-card {background-color: #1e1e2e; border-left: 4px solid #00BFFF; padding: 15px; border-radius: 5px;}
+    .bull-txt {color: #00ff00; font-weight: bold;}
+    .bear-txt {color: #ff4b4b; font-weight: bold;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -78,79 +80,88 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE PREDICCIÓN (NUEVO V67) ---
+# --- MOTOR DE TESIS DE INVERSIÓN (NUEVO V68) ---
+def generar_tesis_automatica(ticker, datos_tecnicos, datos_fundamentales, prediccion, estacionalidad):
+    """Genera un resumen ejecutivo de compra/venta basado en reglas lógicas"""
+    puntos_bull = []
+    puntos_bear = []
+    
+    # 1. Análisis Técnico
+    if datos_tecnicos['RSI'] < 30: puntos_bull.append("Sobreventa Técnica (RSI bajo)")
+    elif datos_tecnicos['RSI'] > 70: puntos_bear.append("Sobrecompra Técnica (RSI alto)")
+    
+    if datos_tecnicos['Precio'] > datos_tecnicos['SMA200']: puntos_bull.append("Tendencia Alcista (Sobre SMA200)")
+    else: puntos_bear.append("Tendencia Bajista (Bajo SMA200)")
+    
+    # 2. Fundamental
+    if datos_fundamentales:
+        if datos_fundamentales.get('Upside', 0) > 10: puntos_bull.append("Subvaluada según Graham/DCF")
+        elif datos_fundamentales.get('Upside', 0) < -10: puntos_bear.append("Sobrevaluada según Fundamentales")
+    
+    # 3. Predicción
+    if prediccion and prediccion['Cambio_Pct'] > 5: puntos_bull.append(f"Proyección +{prediccion['Cambio_Pct']:.1f}% a 30 días")
+    elif prediccion and prediccion['Cambio_Pct'] < -2: puntos_bear.append("Proyección negativa a corto plazo")
+    
+    # 4. Estacionalidad
+    if estacionalidad:
+        mes_actual = datetime.now().month
+        if estacionalidad['Best_Month'] == mes_actual: puntos_bull.append("Mes históricamente FUERTE")
+        elif estacionalidad['Worst_Month'] == mes_actual: puntos_bear.append("Mes históricamente DÉBIL")
+
+    # Conclusión
+    score = len(puntos_bull) - len(puntos_bear)
+    veredicto = "COMPRA FUERTE 🟢" if score >= 3 else "COMPRA 🟢" if score > 0 else "VENTA 🔴" if score < 0 else "NEUTRAL 🟡"
+    
+    return {
+        "Veredicto": veredicto,
+        "Pros": puntos_bull,
+        "Contras": puntos_bear
+    }
+
+# --- MOTORES RESTAURADOS Y FIXES (V68) ---
+@st.cache_data(ttl=900)
+def escanear_mercado_completo(tickers):
+    """(RESTAURADA V68) Escanea el mercado para el ranking"""
+    ranking = []
+    try: data_hist = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
+    except: return pd.DataFrame()
+    
+    for t in tickers:
+        try:
+            df = data_hist[t].dropna() if len(tickers)>1 else data_hist.dropna()
+            info = yf.Ticker(t).info
+            if df.empty: continue
+            
+            # Cálculo simplificado de factores
+            pe = info.get('trailingPE', 50); val = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
+            curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
+            mom = 0
+            if curr > s200: mom += 50
+            if rsi > 50: mom += (rsi - 50) * 2
+            mom = max(0, min(100, mom))
+            
+            score = (val * 0.4) + (mom * 0.6)
+            if "USD" in t: score = mom # Crypto es puro momentum
+            
+            ranking.append({"Ticker": t, "Score": round(score, 1), "Precio": curr, "Value": round(val,0), "Momentum": round(mom,0)})
+        except: pass
+    return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
+
 def generar_proyeccion_futura(ticker, dias=30):
-    """Proyecta precio con Regresión Lineal + Conos de Volatilidad"""
     try:
-        # 1. Datos
         df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
         if df.empty: return None
-        
-        df = df.reset_index()
-        df['Day'] = df.index # Variable tiempo
-        
-        # 2. Modelo Regresión (Tendencia)
-        X = df[['Day']]
-        y = df['Close']
-        model_lr = LinearRegression()
-        model_lr.fit(X, y)
-        
-        # 3. Proyección Futura
+        df = df.reset_index(); df['Day'] = df.index
+        X = df[['Day']]; y = df['Close']
+        model_lr = LinearRegression(); model_lr.fit(X, y)
         last_day = df['Day'].iloc[-1]
         future_days = np.array(range(last_day + 1, last_day + dias + 1)).reshape(-1, 1)
-        future_prices = model_lr.predict(future_days)
-        
-        # 4. Cálculo de Intervalos de Confianza (Volatilidad)
-        # Desviación estándar de los residuos (error histórico)
-        residuals = y - model_lr.predict(X)
-        std_dev = residuals.std()
-        
-        # El cono se abre con el tiempo (incertidumbre aumenta)
-        # Upper = Predicción + (Z * StdDev * Raíz(Tiempo))
-        upper_band = future_prices + (1.96 * std_dev * np.sqrt(np.arange(1, dias + 1)))
-        lower_band = future_prices - (1.96 * std_dev * np.sqrt(np.arange(1, dias + 1)))
-        
-        # Fechas futuras
-        last_date = df['Date'].iloc[-1]
-        future_dates = [last_date + timedelta(days=i) for i in range(1, dias + 1)]
-        
-        return {
-            "Fechas": future_dates,
-            "Predicción": future_prices,
-            "Upper": upper_band,
-            "Lower": lower_band,
-            "Precio_Hoy": df['Close'].iloc[-1],
-            "Precio_Obj": future_prices[-1],
-            "Cambio_Pct": ((future_prices[-1] - df['Close'].iloc[-1]) / df['Close'].iloc[-1]) * 100
-        }
-        
-    except Exception as e: return None
-
-# --- MOTORES EXISTENTES (CON FIX EN CONSENSO) ---
-def obtener_consenso_analistas(ticker):
-    """FIX V67: Asegura que todas las claves existan para evitar KeyError"""
-    if "USD" in ticker: return None
-    try:
-        info = yf.Ticker(ticker).info
-        rec = info.get('recommendationKey', 'none').upper().replace('_', ' ')
-        tm = info.get('targetMeanPrice')
-        cur = info.get('currentPrice')
-        
-        if not tm or not cur: return None
-        
-        # FIX: Usar .get con valores por defecto (Mean) si High/Low no existen
-        th = info.get('targetHighPrice', tm)
-        tl = info.get('targetLowPrice', tm)
-        
-        return {
-            "Recomendación": rec, 
-            "Score": info.get('recommendationMean'), 
-            "Target Mean": tm,
-            "Target High": th, # <--- Fix aplicado
-            "Target Low": tl,  # <--- Fix aplicado
-            "Precio Actual": cur, 
-            "Upside %": ((tm-cur)/cur)*100
-        }
+        pred = model_lr.predict(future_days)
+        std = (y - model_lr.predict(X)).std()
+        upper = pred + (1.96 * std * np.sqrt(np.arange(1, dias + 1)))
+        lower = pred - (1.96 * std * np.sqrt(np.arange(1, dias + 1)))
+        dates = [df['Date'].iloc[-1] + timedelta(days=i) for i in range(1, dias + 1)]
+        return {"Fechas": dates, "Predicción": pred, "Upper": upper, "Lower": lower, "Cambio_Pct": ((pred[-1]-y.iloc[-1])/y.iloc[-1])*100}
     except: return None
 
 @st.cache_data(ttl=3600)
@@ -160,144 +171,127 @@ def analizar_estacionalidad(ticker):
         if df.empty: return None
         df['Retorno'] = df['Close'].pct_change()
         df['Mes_Num'] = df.index.month
-        
         pivot = df.groupby([df.index.year, 'Mes_Num'])['Retorno'].apply(lambda x: (1+x).prod()-1).unstack()*100
-        meses = {1:'Ene',2:'Feb',3:'Mar',4:'Abr',5:'May',6:'Jun',7:'Jul',8:'Ago',9:'Sep',10:'Oct',11:'Nov',12:'Dic'}
-        pivot = pivot.rename(columns=meses)
-        
         avg = df.groupby('Mes_Num')['Retorno'].mean()*100*21
-        avg.index = [meses[i] for i in avg.index]
-        
         return {"Heatmap": pivot, "Avg_Seasonality": avg, "Best_Month": avg.idxmax(), "Worst_Month": avg.idxmin()}
     except: return None
 
-def dibujar_radar_factores(scores):
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=list(scores.values()), theta=list(scores.keys()), fill='toself', line_color='#00ff00', fillcolor='rgba(0, 255, 0, 0.2)'))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
-    return fig
+def calcular_dcf_rapido(ticker):
+    if "USD" in ticker: return None
+    try:
+        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
+        if fcf <= 0: return None
+        pv = 0; g=0.1; w=0.09
+        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
+        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
+        return (pv + pv_term) / i.get('sharesOutstanding', 1)
+    except: return None
 
 def graficar_simple(ticker):
     df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
     if df.empty: return None
-    df['SMA50'] = ta.sma(df['Close'], 50)
+    df['SMA50'] = ta.sma(df['Close'], 50); df['SMA200'] = ta.sma(df['Close'], 200)
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'))
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='yellow'), name='SMA 50'))
     fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
     return fig
 
-@st.cache_data(ttl=600)
-def calcular_factores_quant_single(ticker):
-    try:
-        stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True); info = stock.info
-        if df.empty: return None
-        pe = info.get('trailingPE', 50); score_value = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
-        rev = info.get('revenueGrowth', 0) * 100; score_growth = max(0, min(100, rev * 3.3))
-        curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
-        m = 0
-        if curr > s200: m += 50
-        if rsi > 50: m += (rsi - 50) * 2
-        score_mom = max(0, min(100, m))
-        roe = info.get('returnOnEquity', 0) * 100; mar = info.get('profitMargins', 0) * 100; score_qual = max(0, min(100, (roe * 2) + mar))
-        beta = info.get('beta', 1.5) or 1.0; score_vol = max(0, min(100, (2 - beta) * 100))
-        return {"Value": score_value, "Growth": score_growth, "Momentum": score_mom, "Quality": score_qual, "Low Vol": score_vol}
-    except: return None
-
-# --- INTERFAZ V67 ---
+# --- INTERFAZ V68 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("🔮 Quant Terminal V67")
+with c1: st.title("📝 Quant Terminal V68")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
 stock = yf.Ticker(sel_ticker); hist = stock.history(period="2d"); info = stock.info
 if not hist.empty:
     curr = hist['Close'].iloc[-1]; delta = ((curr - hist['Close'].iloc[-2])/hist['Close'].iloc[-2])*100
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Precio", f"${curr:.2f}", f"{delta:+.2f}%")
-    k2.metric("RSI", f"{ta.rsi(stock.history(period='30d')['Close'], 14).iloc[-1]:.0f}")
-    k3.metric("Vol", f"{info.get('volume',0)/1e6:.1f}M")
-    k4.metric("Beta", f"{info.get('beta',1.0):.2f}")
-    k5.metric("Target", f"${info.get('targetMeanPrice',0):.2f}")
+    st.metric("Precio Actual", f"${curr:.2f}", f"{delta:+.2f}%")
 
 st.divider()
 
 col_main, col_side = st.columns([2, 1])
 
 with col_main:
+    # 1. Gráfico
     st.subheader("📉 Acción del Precio")
     fig_chart = graficar_simple(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    # TABS DETALLE (V67: FORECAST)
-    tabs_detail = st.tabs(["🔮 Predicción", "📅 Ciclos", "👥 Consenso", "📰 Noticias"])
+    # 2. Pestañas de Detalle
+    tabs_detail = st.tabs(["📝 Tesis de Inversión", "🔮 Predicción", "📅 Ciclos", "🧮 Valuación"])
     
-    # 1. PREDICCIÓN (NUEVO V67)
+    # --- PESTAÑA TESIS (NUEVA V68) ---
     with tabs_detail[0]:
-        st.subheader("🔮 Proyección a 30 Días (Monte Carlo Light)")
-        forecast = generar_proyeccion_futura(sel_ticker)
+        st.subheader("📝 Tesis Automática")
         
-        if forecast:
-            fc1, fc2 = st.columns(2)
-            color_fc = "green" if forecast['Cambio_Pct'] > 0 else "red"
-            with fc1:
-                st.markdown(f"""
-                <div class='forecast-card'>
-                    <h4>Precio Objetivo (30d)</h4>
-                    <h2 style='color:{color_fc}'>${forecast['Predicción'][-1]:.2f}</h2>
-                    <p>Cambio Estimado: {forecast['Cambio_Pct']:+.2f}%</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with fc2:
-                st.caption("Interpretación:")
-                st.write("La **línea punteada** es la tendencia matemática.")
-                st.write("El **área sombreada** es el rango de probabilidad (95%). Si la volatilidad es alta, el cono es más ancho.")
+        # Recopilar Datos para la Tesis
+        hist_long = stock.history(period="1y")
+        rsi_val = ta.rsi(hist_long['Close'], 14).iloc[-1]
+        sma200_val = ta.sma(hist_long['Close'], 200).iloc[-1]
+        
+        dat_tec = {"RSI": rsi_val, "Precio": curr, "SMA200": sma200_val}
+        
+        dcf_val = calcular_dcf_rapido(sel_ticker)
+        dat_fund = {"Upside": ((dcf_val - curr)/curr)*100} if dcf_val else {}
+        
+        pred = generar_proyeccion_futura(sel_ticker)
+        cycle = analizar_estacionalidad(sel_ticker)
+        
+        # Generar Tesis
+        tesis = generar_tesis_automatica(sel_ticker, dat_tec, dat_fund, pred, cycle)
+        
+        st.markdown(f"""
+        <div class='thesis-card'>
+            <h2>VEREDICTO: {tesis['Veredicto']}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        c_p, c_c = st.columns(2)
+        with c_p:
+            st.markdown("#### ✅ Factores Alcistas (Bullish)")
+            if tesis['Pros']:
+                for p in tesis['Pros']: st.markdown(f"- {p}")
+            else: st.write("Ninguno relevante.")
             
-            # Gráfico de Predicción
-            fig_fc = go.Figure()
-            # Línea central
-            fig_fc.add_trace(go.Scatter(x=forecast['Fechas'], y=forecast['Predicción'], mode='lines', name='Tendencia', line=dict(color='white', dash='dash')))
-            # Banda Superior
-            fig_fc.add_trace(go.Scatter(x=forecast['Fechas'], y=forecast['Upper'], mode='lines', name='Techo (95%)', line=dict(width=0), showlegend=False))
-            # Banda Inferior (con relleno)
-            fig_fc.add_trace(go.Scatter(x=forecast['Fechas'], y=forecast['Lower'], mode='lines', name='Suelo (5%)', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 255, 0.1)'))
-            
-            fig_fc.update_layout(title="Túnel de Probabilidad Futura", template="plotly_dark", height=300)
-            st.plotly_chart(fig_fc, use_container_width=True)
-        else: st.warning("Datos insuficientes para proyectar.")
+        with c_c:
+            st.markdown("#### ❌ Factores Bajistas (Bearish)")
+            if tesis['Contras']:
+                for c in tesis['Contras']: st.markdown(f"- {c}")
+            else: st.write("Ninguno relevante.")
 
+    # --- OTRAS PESTAÑAS (Resumidas) ---
     with tabs_detail[1]:
-        season_data = analizar_estacionalidad(sel_ticker)
-        if season_data:
-            st.markdown(f"Mejor Mes: **{season_data['Best_Month']}** | Peor Mes: **{season_data['Worst_Month']}**")
-            fig_s = px.bar(x=season_data['Avg_Seasonality'].index, y=season_data['Avg_Seasonality'].values, title="Estacionalidad Promedio", color_discrete_sequence=['#FFD700'])
-            st.plotly_chart(fig_s, use_container_width=True)
-
+        if pred:
+            color_fc = "green" if pred['Cambio_Pct'] > 0 else "red"
+            st.metric("Objetivo 30d", f"${pred['Predicción'][-1]:.2f}", f"{pred['Cambio_Pct']:+.2f}%", delta_color="normal")
+            fig_fc = go.Figure()
+            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Predicción'], mode='lines', name='Tendencia', line=dict(color='white', dash='dash')))
+            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Upper'], mode='lines', line=dict(width=0), showlegend=False))
+            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 255, 0.1)'))
+            fig_fc.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0)); st.plotly_chart(fig_fc, use_container_width=True)
+            
     with tabs_detail[2]:
-        cons = obtener_consenso_analistas(sel_ticker)
-        if cons:
-            st.markdown(f"**Recomendación:** {cons['Recomendación']} | **Target:** ${cons['Target Mean']:.2f}")
-            fig_t = go.Figure()
-            fig_t.add_trace(go.Bar(x=[1], y=[cons['Target High']], name='High', marker_color='green', opacity=0.3))
-            fig_t.add_trace(go.Bar(x=[1], y=[cons['Target Mean']], name='Mean', marker_color='yellow', opacity=0.8))
-            fig_t.add_trace(go.Scatter(x=[1], y=[cons['Precio Actual']], mode='markers+text', text=["Actual"], marker_color='white'))
-            fig_t.update_layout(height=200, barmode='overlay', showlegend=False, paper_bgcolor="#0e1117"); st.plotly_chart(fig_t, use_container_width=True)
-        else: st.info("No disponible para este activo.")
+        if cycle:
+            st.write(f"Mejor Mes: **{cycle['Best_Month']}**")
+            st.plotly_chart(px.bar(x=cycle['Avg_Seasonality'].index, y=cycle['Avg_Seasonality'].values, title="Estacionalidad"), use_container_width=True)
 
     with tabs_detail[3]:
-        if st.button("🤖 Analizar Noticias"):
-            try: st.write(model.generate_content(f"Analisis {sel_ticker} hoy").text)
-            except: st.error("Sin IA")
+        if dcf_val: st.metric("Valor Justo (DCF)", f"${dcf_val:.2f}", f"{((dcf_val-curr)/curr)*100:+.1f}% Upside")
+        else: st.info("Modelo no aplicable.")
 
 with col_side:
-    st.subheader("🧬 Perfil Quant")
-    factores = calcular_factores_quant_single(sel_ticker)
-    if factores: st.plotly_chart(dibujar_radar_factores(factores), use_container_width=True)
-    st.markdown("---")
     st.subheader("⚡ Quick Trade")
     with st.form("quick_order"):
         q_qty = st.number_input("Cantidad", 1, 1000, 10); q_side = st.selectbox("Lado", ["COMPRA", "VENTA"])
         if st.form_submit_button("EJECUTAR"): registrar_operacion_sql(sel_ticker, q_side, q_qty, curr); st.success("Orden Enviada!")
-
-st.markdown("---")
-st.subheader("🏆 Ranking de Mercado")
-if st.button("🔄 ESCANEAR"): st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
+        
+    st.markdown("---")
+    st.subheader("🏆 Ranking Mercado")
+    if st.button("🔄 ESCANEAR"):
+        # Ahora la función SÍ existe
+        st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
+        
+    st.markdown("---")
+    st.subheader("💼 Cartera")
+    df_p = auditar_posiciones_sql()
+    if not df_p.empty: st.dataframe(df_p[['Ticker', 'P&L']], use_container_width=True)
