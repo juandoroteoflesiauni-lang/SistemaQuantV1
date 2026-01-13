@@ -93,129 +93,74 @@ def obtener_cartera():
 
 init_db()
 
-# --- MOTOR MACROECONÓMICO AVANZADO (V87) ---
+# --- MOTOR MACROECONÓMICO AVANZADO ---
 @st.cache_data(ttl=1800)
 def obtener_contexto_macro_avanzado():
-    """Analiza VIX, Bonos, SPY, QQQ e IWM para determinar el 'Risk On/Off'"""
     try:
         tickers = ["^VIX", "^TNX", "SPY", "QQQ", "IWM"]
         data = yf.download(" ".join(tickers), period="5d", progress=False, auto_adjust=True)['Close']
-        
         vix = data['^VIX'].iloc[-1]
         bond_10y = data['^TNX'].iloc[-1]
-        
-        # Ratio IWM/QQQ (Small Caps vs Tech) - Mide apetito de riesgo real
         iwm_qqq_ratio = data['IWM'].iloc[-1] / data['QQQ'].iloc[-1]
         iwm_qqq_prev = data['IWM'].iloc[-5] / data['QQQ'].iloc[-5]
         rotacion = "Hacia Riesgo (Small Caps)" if iwm_qqq_ratio > iwm_qqq_prev else "Hacia Seguridad (Big Tech)"
-        
-        # Fear & Greed Proxy
         fear_greed_score = 50 
         if vix < 15: fear_greed_score += 20
         elif vix > 25: fear_greed_score -= 30
-        
-        # Tendencia Mercado
         spy_trend = "Alcista" if data['SPY'].iloc[-1] > data['SPY'].iloc[0] else "Bajista"
-        
         if spy_trend == "Alcista": fear_greed_score += 10
         else: fear_greed_score -= 10
-        
         estado = "NEUTRAL"
         if fear_greed_score > 65: estado = "EUFORIA (Greed) 🟢"
         elif fear_greed_score < 35: estado = "PÁNICO (Fear) 🔴"
-        
-        return {
-            "VIX": vix,
-            "Bono_10Y": bond_10y,
-            "Rotacion": rotacion,
-            "Estado_Mercado": estado,
-            "Score_Macro": fear_greed_score
-        }
+        return {"VIX": vix, "Bono_10Y": bond_10y, "Rotacion": rotacion, "Estado_Mercado": estado, "Score_Macro": fear_greed_score}
     except: return None
 
-# --- MOTOR FUNDAMENTAL Y NOTICIAS REPARADO (V87) ---
+# --- MOTOR FUNDAMENTAL Y NOTICIAS ---
 @st.cache_data(ttl=3600)
 def analisis_fundamental_y_noticias(ticker):
-    """Combina Ratios Financieros con Análisis de Noticias NLP"""
     if "USD" in ticker: return None
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        
-        # 1. Scoring Financiero (Base 60 puntos)
-        score_fin = 30 # Base
-        
-        # Rentabilidad
-        net_margin = info.get('profitMargins', 0)
-        if net_margin > 0.2: score_fin += 10
-        elif net_margin > 0.1: score_fin += 5
-        
+        score_fin = 30
+        margins = info.get('profitMargins', 0)
+        if margins > 0.20: score_fin += 10
+        elif margins < 0.05: score_fin += 5
         roe = info.get('returnOnEquity', 0)
         if roe > 0.15: score_fin += 10
-        
-        # Solvencia
         current_ratio = info.get('currentRatio', 0)
         if current_ratio > 1.5: score_fin += 5
-        
         debt_eq = info.get('debtToEquity', 0)
         if debt_eq < 100: score_fin += 5
-        
-        # 2. Análisis NLP de Noticias (Base 40 puntos)
-        score_news = 20 # Neutral base
+        score_news = 20
         noticias_relevantes = []
         try:
             news = stock.news[:5]
             bull_words = ['beat', 'rise', 'up', 'growth', 'strong', 'buy', 'record', 'gain']
             bear_words = ['miss', 'fall', 'down', 'weak', 'sell', 'loss', 'drop', 'risk']
-            
             for n in news:
                 title = n['title']
                 txt_lower = title.lower()
                 impacto = 0
                 if any(w in txt_lower for w in bull_words): impacto += 1
                 if any(w in txt_lower for w in bear_words): impacto -= 1
-                
-                score_news += (impacto * 4) # Cada noticia mueve 4 puntos
-                
+                score_news += (impacto * 4)
                 label = "Positivo" if impacto > 0 else "Negativo" if impacto < 0 else "Neutral"
                 noticias_relevantes.append(f"{label}: {title}")
-                
         except: pass
-        
-        # Score Final
-        total_score = min(100, max(0, score_fin + score_news - 20)) # Ajuste
-        
-        # Diagnóstico
+        total_score = min(100, max(0, score_fin + score_news - 20))
         calidad = "EXCELENTE 💎" if total_score > 75 else "SÓLIDA ✅" if total_score > 50 else "DÉBIL ⚠️"
-        
-        return {
-            "Score_Total": total_score,
-            "Calidad": calidad,
-            "Ratios": {
-                "Margen_Neto": net_margin * 100,
-                "ROE": roe * 100,
-                "Deuda_Eq": debt_eq,
-                "Liquidez": current_ratio
-            },
-            "Noticias_Resumen": noticias_relevantes
-        }
+        return {"Score_Total": total_score, "Calidad": calidad, "Ratios": {"Margen_Neto": margins * 100, "ROE": roe * 100, "Deuda_Eq": debt_eq, "Liquidez": current_ratio}, "Noticias_Resumen": noticias_relevantes}
     except: return None
 
-# --- ESTRATEGIA OPERATIVA PROFESIONAL (IA V87) ---
+# --- ESTRATEGIA OPERATIVA PROFESIONAL (IA) ---
 def generar_estrategia_profesional(ticker, snap, macro, fund, mc, ml, dcf):
-    """Prompt de Ingeniería Financiera para generar informes tipo Mesa de Dinero"""
-    
-    # Construcción del Contexto
     ctx_macro = f"VIX: {macro['VIX']:.2f}, Bonos 10Y: {macro['Bono_10Y']:.2f}%, Mercado: {macro['Estado_Mercado']}, Rotación: {macro['Rotacion']}." if macro else "Sin datos macro."
-    
     ctx_micro = "Sin datos fundamentales."
-    if fund:
-        ctx_micro = f"Score Calidad: {fund['Score_Total']}/100 ({fund['Calidad']}). Margen Neto: {fund['Ratios']['Margen_Neto']:.2f}%. Noticias recientes: {'; '.join(fund['Noticias_Resumen'][:2])}."
-    
+    if fund: ctx_micro = f"Score Calidad: {fund['Score_Total']}/100 ({fund['Calidad']}). Margen Neto: {fund['Ratios']['Margen_Neto']:.2f}%. Noticias recientes: {'; '.join(fund['Noticias_Resumen'][:2])}."
     ctx_tecnico = f"Precio: ${snap['Precio']:.2f}. RSI: {snap['RSI']:.0f}. Tendencia CP: {'Alcista' if snap['Precio']>snap['Previo'] else 'Bajista'}."
-    
     ctx_quant = f"Monte Carlo (30d): Probabilidad Suba {mc['Prob_Suba']:.1f}%. Riesgo VaR: ${mc['VaR_95']:.2f}. ML Predice: {ml['Pred']} (Conf: {ml['Acc']:.0f}%)." if mc and ml else "Faltan modelos quant."
-    
     val_dcf = f"${dcf:.2f}" if dcf else "N/A"
 
     prompt = f"""
@@ -244,14 +189,12 @@ def generar_estrategia_profesional(ticker, snap, macro, fund, mc, ml, dcf):
     ### 3. 🧠 Tesis del Trade & Riesgo
     Integra el resultado de Monte Carlo y el Oráculo ML. ¿Qué probabilidad tenemos a favor? ¿Cuál es el riesgo de caída (VaR)? Argumenta la decisión final como un profesional.
     """
-    
     try: return model.generate_content(prompt).text
     except: return "⚠️ Error conectando con el Estratega IA."
 
-# --- MOTORES TÉCNICOS (V83/V86) ---
+# --- MOTORES TÉCNICOS ---
 def calcular_vsa_color(row):
-    if row['Volume'] > row['Vol_SMA'] * 1.5:
-        return 'rgba(0, 255, 0, 0.6)' if row['Close'] > row['Open'] else 'rgba(255, 0, 0, 0.6)'
+    if row['Volume'] > row['Vol_SMA'] * 1.5: return 'rgba(0, 255, 0, 0.6)' if row['Close'] > row['Open'] else 'rgba(255, 0, 0, 0.6)'
     elif row['Volume'] < row['Vol_SMA'] * 0.5: return 'rgba(100, 100, 100, 0.3)'
     else: return 'rgba(100, 100, 100, 0.6)'
 
@@ -290,7 +233,6 @@ def graficar_profesional_quant(ticker, intervalo):
     df['Vol_SMA'] = ta.sma(df['Volume'], 20)
     colors_vsa = df.apply(calcular_vsa_color, axis=1)
     df = detectar_patrones_velas_pro(df); df = calcular_soportes_resistencias(df)
-    
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2], subplot_titles=(f"Precio ({intervalo}) + VWAP + Patrones", "VSA (Volumen)", "MACD", "RSI"))
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=1.5), name='VWAP'), row=1, col=1)
@@ -359,6 +301,17 @@ def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max
         pnl = val_intr - prima if posicion == 'Compra' else prima - val_intr
         payoffs.append(pnl)
     return precios, payoffs
+
+def calcular_dcf_rapido(ticker): # <--- FUNCIÓN REINTEGRADA
+    if "USD" in ticker: return None
+    try:
+        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
+        if fcf <= 0: return None
+        pv = 0; g=0.1; w=0.09
+        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
+        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
+        return (pv + pv_term) / i.get('sharesOutstanding', 1)
+    except: return None
 
 def scanner_mercado(tickers):
     ranking = []
