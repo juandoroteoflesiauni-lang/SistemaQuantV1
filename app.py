@@ -280,4 +280,4 @@ with col_side:
 st.markdown("---")
 st.subheader("🏆 Ranking de Mercado")
 if st.button("🔄 ESCANEAR"):
-    st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)s
+    st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
