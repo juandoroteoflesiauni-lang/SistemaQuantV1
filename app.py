@@ -22,20 +22,20 @@ import google.generativeai as genai
 from fpdf import FPDF
 import base64
 
-# --- 1. CONFIGURACIÓN MAESTRA ---
+# --- 1. CONFIGURACIÓN DEL SISTEMA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V82 (The Strategist)", layout="wide", page_icon="♟️")
+st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V83", layout="wide", page_icon="🏛️")
 
+# Estilos CSS (Professional Dark Theme)
 st.markdown("""<style>
     .main {background-color: #0e1117;}
     .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
     .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
     .metric-label {font-size: 14px; color: #a0a0a0;}
-    .profit {color: #00cc96;}
-    .loss {color: #ff4b4b;}
     .ai-box {background-color: #131420; border-left: 4px solid #9c27b0; padding: 20px; border-radius: 5px; margin-top: 10px;}
-    .option-card {background-color: #1a2634; border: 1px solid #FFD700; padding: 15px; border-radius: 8px;}
     .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
+    /* Ajuste para listas personalizadas */
+    .watchlist-box {background-color: #111; padding: 10px; border-radius: 5px; border: 1px solid #333; margin-bottom: 10px;}
 </style>""", unsafe_allow_html=True)
 
 # API Keys
@@ -45,81 +45,165 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
+# Base de datos y Listas Default
 DB_NAME = "quant_database.db"
+DEFAULT_WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 
-# --- 2. MOTORES DE DATOS (BACKEND) ---
+# Inicializar Session State para Listas Personalizadas
+if 'mis_listas' not in st.session_state:
+    st.session_state['mis_listas'] = {"General": DEFAULT_WATCHLIST, "Vigiladas": [], "Cartera": []}
+if 'lista_activa' not in st.session_state:
+    st.session_state['lista_activa'] = "General"
 
-# Motor SQL (Actualizado V82 con Diario Psicológico)
-def init_db():
-    conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL, emocion TEXT, nota TEXT)''')
-    conn.commit(); conn.close()
+# --- 2. MOTORES DE ANÁLISIS TÉCNICO (PROFESIONAL) ---
 
-def registrar_operacion(t, tipo, q, p, emo, nota):
-    conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    total = q * p; fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO trades (fecha, ticker, tipo, cantidad, precio, total, emocion, nota) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (fecha, t, tipo, q, p, total, emo, nota))
-    conn.commit(); conn.close()
+def calcular_vsa_color(row):
+    """Asigna color a la barra de volumen según lógica VSA (Tom Williams)"""
+    # Verde: Cierre alcista con volumen alto (Fortaleza)
+    # Rojo: Cierre bajista con volumen alto (Debilidad)
+    # Gris: Volumen promedio o bajo
+    if row['Volume'] > row['Vol_SMA'] * 1.5:
+        return 'rgba(0, 255, 0, 0.6)' if row['Close'] > row['Open'] else 'rgba(255, 0, 0, 0.6)'
+    elif row['Volume'] < row['Vol_SMA'] * 0.5:
+        return 'rgba(100, 100, 100, 0.3)' # Sin interés
+    else:
+        return 'rgba(100, 100, 100, 0.6)' # Normal
 
-def obtener_cartera():
-    conn = sqlite3.connect(DB_NAME); df = pd.read_sql_query("SELECT * FROM trades", conn); conn.close()
-    if df.empty: return pd.DataFrame()
-    # Lógica de P&L acumulado
-    pos = {}
-    for i, r in df.iterrows():
-        t = r['ticker']
-        if t not in pos: pos[t] = {"Qty": 0, "Cost": 0}
-        if r['tipo'] == "COMPRA": pos[t]["Qty"] += r['cantidad']; pos[t]["Cost"] += r['total']
-        elif r['tipo'] == "VENTA": 
-            pos[t]["Qty"] -= r['cantidad']
-            if pos[t]["Qty"] > 0: unit = pos[t]["Cost"]/(pos[t]["Qty"]+r['cantidad']); pos[t]["Cost"] -= (unit*r['cantidad'])
-            else: pos[t]["Cost"] = 0
-    res = []
-    activos = [t for t, d in pos.items() if d['Qty'] > 0]
-    if not activos: return pd.DataFrame()
-    try: curr = yf.download(" ".join(activos), period="1d", progress=False, auto_adjust=True)['Close']
-    except: return pd.DataFrame()
-    for t in activos:
-        d = pos[t]
-        try:
-            px = float(curr.iloc[-1]) if len(activos) == 1 else float(curr.iloc[-1][t])
-            val = d['Qty'] * px; pnl = val - d['Cost']
-            pct = (pnl / d['Cost']) * 100 if d['Cost'] > 0 else 0
-            res.append({"Ticker": t, "Cantidad": d['Qty'], "Precio Prom": d['Cost']/d['Qty'], "Precio Actual": px, "Valor": val, "P&L $": pnl, "P&L %": pct})
-        except: pass
-    return pd.DataFrame(res)
+def detectar_patrones_velas_pro(df):
+    """Detecta Marubozu, Martillos, Dojis, Engulfing"""
+    # Geometría de la vela
+    df['Cuerpo'] = abs(df['Close'] - df['Open'])
+    df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
+    df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
+    df['Rango'] = df['High'] - df['Low']
+    df['Cuerpo_Prom'] = df['Cuerpo'].rolling(10).mean()
+    
+    # 1. MARUBOZU (Cuerpo gigante, sin mechas o mínimas) - Señal de Convicción
+    # Condición: Cuerpo > 2x Promedio Y Mechas < 5% del Rango
+    df['Patron_Marubozu_Bull'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & \
+                                 (df['Mecha_Sup'] < 0.05 * df['Rango']) & \
+                                 (df['Mecha_Inf'] < 0.05 * df['Rango']) & \
+                                 (df['Close'] > df['Open'])
 
-init_db()
+    df['Patron_Marubozu_Bear'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & \
+                                 (df['Mecha_Sup'] < 0.05 * df['Rango']) & \
+                                 (df['Mecha_Inf'] < 0.05 * df['Rango']) & \
+                                 (df['Close'] < df['Open'])
 
-# Motor Snapshot
-@st.cache_data(ttl=900)
-def get_snapshot(ticker):
+    # 2. MARTILLO (Rebote)
+    df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & \
+                            (df['Mecha_Sup'] < 0.3 * df['Cuerpo'])
+                            
+    # 3. DOJI (Indecisión)
+    df['Patron_Doji'] = df['Cuerpo'] <= df['Rango'] * 0.1
+    
+    # 4. ENGULFING
+    df['Patron_BullEng'] = (df['Close'] > df['Open']) & \
+                           (df['Close'].shift(1) < df['Open'].shift(1)) & \
+                           (df['Close'] > df['Open'].shift(1)) & \
+                           (df['Open'] < df['Close'].shift(1))
+
+    return df
+
+def calcular_soportes_resistencias(df, window=20):
+    """Identifica zonas de S/R usando máximos/mínimos locales (Fractales)"""
+    df['Resistencia'] = df['High'].rolling(window=window, center=True).max()
+    df['Soporte'] = df['Low'].rolling(window=window, center=True).min()
+    return df
+
+@st.cache_data(ttl=60) # Cache corto para intradía
+def obtener_datos_grafico(ticker, intervalo):
+    """Gestor inteligente de periodos según el intervalo seleccionado"""
+    # Mapeo Intervalo -> Periodo óptimo para yfinance
+    mapa_periodos = {
+        "15m": "60d", # Máximo permitido por Yahoo para 15m
+        "1h": "730d", # Máximo 2 años
+        "4h": "2y",
+        "1d": "2y",
+        "1wk": "5y",
+        "1mo": "10y"
+    }
+    periodo = mapa_periodos.get(intervalo, "1y")
+    
     try:
-        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
-        if hist.empty: return None
-        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50}
+        df = yf.Ticker(ticker).history(period=periodo, interval=intervalo)
+        if df.empty: return None
+        return df
     except: return None
 
-# Motor Ranking
-@st.cache_data(ttl=3600)
-def scanner_mercado(tickers):
-    ranking = []
-    try: data = yf.download(" ".join(tickers), period="6mo", group_by='ticker', progress=False, auto_adjust=True)
-    except: return pd.DataFrame()
-    for t in tickers:
-        try:
-            df = data[t].dropna() if len(tickers)>1 else data.dropna()
-            if df.empty: continue
-            curr = df['Close'].iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]; sma200 = df['Close'].rolling(200).mean().iloc[-1]
-            trend = "Alcista" if curr > sma200 else "Bajista"
-            score = 50 + (20 if trend == "Alcista" else 0) + (20 if rsi < 30 else -10 if rsi > 70 else 0)
-            ranking.append({"Ticker": t, "Precio": curr, "RSI": rsi, "Tendencia": trend, "Score": score})
-        except: pass
-    return pd.DataFrame(ranking).sort_values("Score", ascending=False)
+def graficar_profesional_quant(ticker, intervalo):
+    df = obtener_datos_grafico(ticker, intervalo)
+    if df is None: return None
+    
+    # --- CÁLCULO DE INDICADORES ---
+    # 1. MACD (Trend & Momentum)
+    macd = ta.macd(df['Close'])
+    df = pd.concat([df, macd], axis=1)
+    
+    # 2. RSI (Oscilador)
+    df['RSI'] = ta.rsi(df['Close'], 14)
+    
+    # 3. VWAP (Volume Weighted Average Price - Institucional)
+    try:
+        # VWAP suele requerir reset diario en intradía, pandas_ta lo maneja aproximado
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+    except: df['VWAP'] = ta.sma(df['Close'], 20) # Fallback si falla VWAP
+    
+    # 4. VSA (Volumen)
+    df['Vol_SMA'] = ta.sma(df['Volume'], 20)
+    colors_vsa = df.apply(calcular_vsa_color, axis=1)
+    
+    # 5. Patrones & S/R
+    df = detectar_patrones_velas_pro(df)
+    df = calcular_soportes_resistencias(df)
+    
+    # --- CONSTRUCCIÓN DEL GRÁFICO (4 PANELES) ---
+    fig = make_subplots(
+        rows=4, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.03, 
+        row_heights=[0.5, 0.15, 0.15, 0.2],
+        subplot_titles=(f"Precio ({intervalo}) + VWAP + Patrones", "VSA (Volumen)", "MACD", "RSI")
+    )
+    
+    # PANEL 1: PRECIO
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=1.5), name='VWAP (Institucional)'), row=1, col=1)
+    
+    # Soportes y Resistencias (Últimos valores extendidos)
+    last_sup = df['Soporte'].iloc[-1]
+    last_res = df['Resistencia'].iloc[-1]
+    fig.add_hline(y=last_res, line_dash="dash", line_color="red", row=1, col=1, annotation_text="Resistencia")
+    fig.add_hline(y=last_sup, line_dash="dash", line_color="green", row=1, col=1, annotation_text="Soporte")
+    
+    # Marcadores de Patrones
+    maru_bull = df[df['Patron_Marubozu_Bull']]
+    maru_bear = df[df['Patron_Marubozu_Bear']]
+    hammer = df[df['Patron_Martillo']]
+    
+    fig.add_trace(go.Scatter(x=maru_bull.index, y=maru_bull['Low'], mode='markers', marker=dict(symbol='square', size=8, color='blue'), name='Marubozu Alcista'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=maru_bear.index, y=maru_bear['High'], mode='markers', marker=dict(symbol='square', size=8, color='purple'), name='Marubozu Bajista'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=hammer.index, y=hammer['Low'], mode='markers', marker=dict(symbol='diamond', size=6, color='cyan'), name='Martillo'), row=1, col=1)
 
-# Motor ML
+    # PANEL 2: VOLUMEN VSA
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors_vsa, name='Volumen VSA'), row=2, col=1)
+    
+    # PANEL 3: MACD
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], line=dict(color='white', width=1), name='MACD'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], line=dict(color='orange', width=1), name='Signal'), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], marker_color='gray', name='Hist'), row=3, col=1)
+    
+    # PANEL 4: RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1), name='RSI'), row=4, col=1)
+    fig.add_hline(y=70, line_color="red", line_dash="dot", row=4, col=1)
+    fig.add_hline(y=30, line_color="green", line_dash="dot", row=4, col=1)
+    
+    fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=30,b=0))
+    return fig
+
+# --- 3. MOTORES "INTOCABLES" (ORÁCULO & TESIS) ---
 def oraculo_ml(ticker):
+    """Mantenido igual a V79/V82"""
     try:
         df = yf.Ticker(ticker).history(period="2y")
         if len(df)<200: return None
@@ -135,219 +219,105 @@ def oraculo_ml(ticker):
         return {"Pred": "SUBE 🟢" if pred==1 else "BAJA 🔴", "Acc": acc*100, "Prob": prob*100}
     except: return None
 
-# Motor Opciones (NUEVO V82 - Basado en Hull/Cohen)
-def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max, posicion='Compra'):
-    """Genera datos para gráfico de Payoff al vencimiento"""
-    precios = np.linspace(precio_spot_min, precio_spot_max, 100)
-    payoffs = []
-    
-    for S in precios:
-        if tipo == 'Call':
-            valor_intrinseco = max(S - strike, 0)
-        else: # Put
-            valor_intrinseco = max(strike - S, 0)
-            
-        if posicion == 'Compra':
-            pnl = valor_intrinseco - prima
-        else: # Venta (Lanzamiento)
-            pnl = prima - valor_intrinseco
-        payoffs.append(pnl)
-        
-    return precios, payoffs
-
-# Motor PDF
-class PDFReport(FPDF):
-    def header(self): self.set_font('Arial', 'B', 15); self.cell(0, 10, 'Informe Quant V82', 0, 1, 'C'); self.ln(5)
-def clean(t): return str(t).encode('latin-1', 'replace').decode('latin-1')
-def generar_pdf(ticker, data, ia_text):
-    pdf = PDFReport(); pdf.add_page(); pdf.set_font('Arial', 'B', 16)
-    pdf.cell(0, 10, f'Analisis: {ticker}', 0, 1); pdf.set_font('Arial', '', 11)
-    pdf.cell(0, 10, f'Precio: ${data["Precio"]:.2f} | RSI: {data["RSI"]:.0f}', 0, 1)
-    pdf.ln(5); pdf.multi_cell(0, 6, clean(ia_text))
-    return pdf.output(dest='S').encode('latin-1')
-
-# Motor IA
 def consultar_ia(contexto):
+    """Mantenido igual a V79/V82"""
     try: return model.generate_content(contexto).text
     except: return "IA no disponible."
 
-# --- 3. INTERFAZ GRÁFICA (FRONTEND) ---
+# --- 4. INTERFAZ ---
 
-# SIDEBAR (Control Global)
+# SIDEBAR: GESTOR DE LISTAS
 with st.sidebar:
-    st.title("♟️ Quant V82")
-    st.caption("Estrategia & Psicología")
-    st.markdown("---")
+    st.title("🏛️ Sistema Prof. Quant")
     
-    sel_ticker = st.selectbox("🔍 Activo", WATCHLIST)
+    # Gestor de Listas
+    st.markdown("### 📂 Listas de Seguimiento")
     
-    # SECCIÓN OPERATIVA CON PSICOLOGÍA (NUEVO V82)
-    st.markdown("### 🧠 Bitácora de Operación")
-    with st.form("trade_form"):
-        qty = st.number_input("Cantidad", 1, 1000, 10)
-        side = st.selectbox("Lado", ["COMPRA", "VENTA"])
-        
-        # Campos de Psicología (Mark Douglas Style)
-        st.markdown("---")
-        st.caption("Registro Psicológico (Trading in the Zone)")
-        emocion = st.select_slider("Estado Emocional", options=["Miedo", "Ansiedad", "Neutro", "Confianza", "Euforia"], value="Neutro")
-        nota = st.text_area("Razón del Trade (Setup)", placeholder="Ej: Rebote en SMA200 + RSI sobrevendido...")
-        
-        if st.form_submit_button("EJECUTAR Y REGISTRAR"):
-            current = get_snapshot(sel_ticker)
-            if current:
-                registrar_operacion(sel_ticker, side, qty, current['Precio'], emocion, nota)
-                st.success(f"Orden ejecutada @ ${current['Precio']:.2f}")
-                time.sleep(1)
+    # Selector de Lista Activa
+    lista_actual = st.selectbox("Ver Lista:", list(st.session_state['mis_listas'].keys()), index=0)
+    st.session_state['lista_activa'] = lista_actual
+    
+    # Mostrar Tickers de la lista seleccionada
+    activos_lista = st.session_state['mis_listas'][lista_actual]
+    sel_ticker = st.selectbox("🔍 Seleccionar Activo", activos_lista if activos_lista else ["Sin Activos"])
+    
+    # Herramientas de Edición de Listas
+    with st.expander("⚙️ Gestionar Listas"):
+        # Crear Nueva Lista
+        nueva_lista = st.text_input("Nombre Nueva Lista")
+        if st.button("Crear Lista"):
+            if nueva_lista and nueva_lista not in st.session_state['mis_listas']:
+                st.session_state['mis_listas'][nueva_lista] = []
+                st.success(f"Lista {nueva_lista} creada.")
                 st.rerun()
-            else: st.error("Sin precio.")
-    
-    st.markdown("---")
-    st.info("Perfil: Strategist\nRef: Hull / Douglas / Graham")
-
-# PESTAÑAS PRINCIPALES
-tabs = st.tabs(["📊 DASHBOARD", "♟️ LABORATORIO OPCIONES", "🔬 ANÁLISIS", "🧠 PSICOLOGÍA"])
-
-# --- TAB 1: DASHBOARD ---
-with tabs[0]:
-    st.subheader("🌍 Visión Ejecutiva")
-    df_pos = obtener_cartera()
-    patrimonio = df_pos['Valor'].sum() if not df_pos.empty else 0
-    pnl_total = df_pos['P&L $'].sum() if not df_pos.empty else 0
-    ranking = scanner_mercado(WATCHLIST)
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(f"<div class='metric-card'><div class='metric-label'>Patrimonio</div><div class='metric-value'>${patrimonio:,.2f}</div></div>", unsafe_allow_html=True)
-    c2.markdown(f"<div class='metric-card'><div class='metric-label'>P&L Total</div><div class='metric-value {'profit' if pnl_total>=0 else 'loss'}'>${pnl_total:+,.2f}</div></div>", unsafe_allow_html=True)
-    if not ranking.empty:
-        c3.markdown(f"<div class='metric-card'><div class='metric-label'>Top Pick</div><div class='metric-value'>{ranking.iloc[0]['Ticker']}</div></div>", unsafe_allow_html=True)
-    spy = get_snapshot("SPY")
-    if spy:
-        delta = ((spy['Precio']-spy['Previo'])/spy['Previo'])*100
-        c4.markdown(f"<div class='metric-card'><div class='metric-label'>S&P 500</div><div class='metric-value {'profit' if delta>=0 else 'loss'}'>{delta:+.2f}%</div></div>", unsafe_allow_html=True)
-
-    st.markdown("---")
-    kc1, kc2 = st.columns([1, 2])
-    with kc1:
-        if not df_pos.empty:
-            fig = px.pie(df_pos, values='Valor', names='Ticker', hole=0.5, title="Allocación")
-            st.plotly_chart(fig, use_container_width=True)
-    with kc2:
-        st.dataframe(ranking.head(5), use_container_width=True)
-
-# --- TAB 2: ESTRATEGIAS OPCIONES (NUEVO V82) ---
-with tabs[1]:
-    st.subheader("♟️ Laboratorio de Derivados (Hull & Cohen)")
-    st.info("Simula estrategias antes de operar. Analiza el Payoff al vencimiento.")
-    
-    col_op1, col_op2 = st.columns([1, 3])
-    
-    snap = get_snapshot(sel_ticker)
-    precio_ref = snap['Precio'] if snap else 100
-    
-    with col_op1:
-        st.markdown("#### Configuración Estrategia")
-        tipo_est = st.selectbox("Estrategia", ["Simple (Call/Put)", "Bull Call Spread", "Bear Put Spread"])
         
-        # Parámetros dinámicos
-        if tipo_est == "Simple (Call/Put)":
-            op_tipo = st.selectbox("Tipo", ["Call", "Put"])
-            op_pos = st.selectbox("Posición", ["Compra (Long)", "Venta (Short)"])
-            strike = st.number_input("Strike", value=float(int(precio_ref)))
-            prima = st.number_input("Prima (Costo)", value=5.0)
-            
-            # Calcular Payoff
-            precios, payoffs = calcular_payoff_opcion(op_tipo, strike, prima, precio_ref*0.7, precio_ref*1.3, op_pos)
-            
-        elif "Spread" in tipo_est:
-            st.caption("Compra Opción A + Venta Opción B")
-            k1 = st.number_input("Strike Compra (K1)", value=float(int(precio_ref)))
-            p1 = st.number_input("Prima Compra", value=5.0)
-            k2 = st.number_input("Strike Venta (K2)", value=float(int(precio_ref*1.1)))
-            p2 = st.number_input("Prima Venta", value=2.0)
-            
-            tipo_op = "Call" if "Call" in tipo_est else "Put"
-            px1, py1 = calcular_payoff_opcion(tipo_op, k1, p1, precio_ref*0.7, precio_ref*1.3, 'Compra')
-            px2, py2 = calcular_payoff_opcion(tipo_op, k2, p2, precio_ref*0.7, precio_ref*1.3, 'Venta')
-            precios = px1
-            payoffs = np.array(py1) + np.array(py2)
+        # Agregar Activo a Lista Actual
+        nuevo_ticker = st.text_input("Agregar Ticker (Ej: AAPL)").upper()
+        if st.button("➕ Agregar a esta lista"):
+            if nuevo_ticker and nuevo_ticker not in st.session_state['mis_listas'][lista_actual]:
+                st.session_state['mis_listas'][lista_actual].append(nuevo_ticker)
+                st.success("Agregado.")
+                st.rerun()
+        
+        # Borrar Lista
+        if st.button("🗑️ Borrar Lista Actual") and lista_actual != "General":
+            del st.session_state['mis_listas'][lista_actual]
+            st.session_state['lista_activa'] = "General"
+            st.rerun()
 
-    with col_op2:
-        st.markdown(f"#### Diagrama de Payoff: {sel_ticker} (Ref: ${precio_ref:.2f})")
-        
-        # Gráfico Payoff
-        fig_pay = go.Figure()
-        fig_pay.add_trace(go.Scatter(x=precios, y=payoffs, mode='lines', name='P&L', fill='tozeroy', line=dict(color='cyan', width=3)))
-        
-        # Línea Cero
-        fig_pay.add_hline(y=0, line_color="white", line_dash="dash")
-        # Línea Precio Actual
-        fig_pay.add_vline(x=precio_ref, line_color="yellow", annotation_text="Precio Actual")
-        
-        fig_pay.update_layout(template="plotly_dark", title="Ganancia/Pérdida al Vencimiento", xaxis_title="Precio del Activo", yaxis_title="P&L ($)")
-        st.plotly_chart(fig_pay, use_container_width=True)
-        
-        max_profit = max(payoffs)
-        max_loss = min(payoffs)
-        c_res1, c_res2 = st.columns(2)
-        c_res1.metric("Máxima Ganancia", f"${max_profit:.2f}")
-        c_res2.metric("Máximo Riesgo", f"${max_loss:.2f}")
+# PANEL PRINCIPAL
+st.title(f"Análisis: {sel_ticker}")
 
-# --- TAB 3: ANÁLISIS MICRO (V81) ---
-with tabs[2]:
-    c_an1, c_an2 = st.columns([2, 1])
-    with c_an1:
-        st.subheader("📉 Técnico & ML")
-        if snap:
-            df_chart = yf.Ticker(sel_ticker).history(period="1y")
-            df_chart['SMA50'] = ta.sma(df_chart['Close'], 50)
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-            fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close']), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA50'], line=dict(color='orange'), name="SMA50"), row=1, col=1)
-            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume']), row=2, col=1)
-            fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0))
-            st.plotly_chart(fig, use_container_width=True)
-            
-    with c_an2:
-        st.markdown("#### 🤖 Oráculo")
-        if st.button("🔮 Predecir"):
+# SNAPSHOT RAPIDO
+try:
+    info = yf.Ticker(sel_ticker).info
+    precio = info.get('currentPrice', 0)
+    target = info.get('targetMeanPrice', 0)
+    
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Precio Actual", f"${precio}")
+    k2.metric("Target Analistas", f"${target}")
+    k3.metric("Rango 52sem", f"{info.get('fiftyTwoWeekLow',0)} - {info.get('fiftyTwoWeekHigh',0)}")
+    k4.metric("Volumen", f"{info.get('volume',0)/1e6:.1f}M")
+except: st.warning("Datos en tiempo real demorados.")
+
+# SECCIÓN DE GRÁFICO PROFESIONAL
+st.markdown("### 📉 Gráfico Profesional Quant")
+c_time, c_info = st.columns([1, 5])
+with c_time:
+    timeframe = st.selectbox("Temporalidad", ["1d", "15m", "1h", "4h", "1wk", "1mo"], index=0)
+    st.info("Indicadores Activos:\n- VSA (Color Vol)\n- VWAP\n- MACD & RSI\n- Soportes/Res.\n- Marubozu/Martillo")
+
+with c_info:
+    if sel_ticker != "Sin Activos":
+        fig = graficar_profesional_quant(sel_ticker, timeframe)
+        if fig: st.plotly_chart(fig, use_container_width=True, height=800)
+        else: st.error("Error cargando gráfico. Verifique el ticker o intente otra temporalidad.")
+
+# SECCIÓN "ORÁCULO" Y "TESIS IA" (MANTENIDA IGUAL)
+st.markdown("---")
+c_oraculo, c_tesis = st.columns([1, 2])
+
+with c_oraculo:
+    st.markdown("### 🤖 Oráculo ML")
+    st.caption("Random Forest (Datos: 2 Años)")
+    if st.button("🔮 Consultar Oráculo"):
+        with st.spinner("La IA está pensando..."):
             ml = oraculo_ml(sel_ticker)
             if ml:
-                st.markdown(f"<h2>{ml['Pred']}</h2>", unsafe_allow_html=True)
-                st.metric("Confianza Histórica", f"{ml['Acc']:.1f}%")
-        
-        st.markdown("#### 📝 Tesis IA")
-        if st.button("⚡ Generar Informe"):
-            prompt = f"Analisis financiero corto {sel_ticker}. Precio {snap['Precio'] if snap else 0}. RSI {snap['RSI'] if snap else 0}. Recomendacion."
-            res = consultar_ia(prompt)
-            st.session_state['ia_res'] = res
-        if 'ia_res' in st.session_state:
-            st.caption(st.session_state['ia_res'])
-            if st.button("📄 PDF"):
-                b64 = base64.b64encode(generar_pdf(sel_ticker, snap, st.session_state['ia_res'])).decode()
-                st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="Reporte.pdf">Descargar</a>', unsafe_allow_html=True)
+                st.metric("Predicción", ml['Pred'])
+                st.metric("Probabilidad", f"{ml['Prob']:.1f}%")
+                st.metric("Precisión Histórica", f"{ml['Acc']:.1f}%")
+                if ml['Acc'] < 55: st.warning("Confianza baja.")
+            else: st.error("Datos insuficientes.")
 
-# --- TAB 4: PSICOLOGÍA (NUEVO V82) ---
-with tabs[3]:
-    st.subheader("🧠 Diario de Trading & Auditoría Emocional")
-    
-    conn = sqlite3.connect(DB_NAME)
-    try:
-        df_diario = pd.read_sql_query("SELECT fecha, ticker, tipo, emocion, nota, total FROM trades ORDER BY fecha DESC", conn)
-        
-        if not df_diario.empty:
-            # Análisis Emocional
-            c_emo1, c_emo2 = st.columns([1, 2])
-            
-            with c_emo1:
-                st.markdown("#### Estado Mental Predominante")
-                fig_emo = px.pie(df_diario, names='emocion', title="Distribución de Emociones", hole=0.4)
-                st.plotly_chart(fig_emo, use_container_width=True)
-            
-            with c_emo2:
-                st.markdown("#### Bitácora de Decisiones")
-                st.dataframe(df_diario, use_container_width=True)
-        else:
-            st.info("No hay registros. Realiza una operación en el Sidebar para comenzar tu diario.")
-    except: st.error("Error leyendo base de datos.")
-    conn.close()
+with c_tesis:
+    st.markdown("### 📝 Tesis de Inversión (IA Generativa)")
+    if st.button("⚡ Generar Tesis"):
+        prompt = f"""
+        Actúa como un Analista Senior Cuantitativo. Analiza {sel_ticker}.
+        Basado en analisis tecnico estandar (RSI, Tendencia) y fundamental basico.
+        Dame una recomendacion de compra, venta o mantener y 3 razones clave.
+        """
+        res = consultar_ia(prompt)
+        st.markdown(f"<div class='ai-box'>{res}</div>", unsafe_allow_html=True)
