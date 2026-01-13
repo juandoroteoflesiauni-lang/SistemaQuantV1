@@ -17,16 +17,17 @@ from datetime import datetime, timedelta
 from scipy.stats import norm 
 from sklearn.linear_model import LinearRegression
 import google.generativeai as genai
+from fpdf import FPDF # Librería para PDF
+import base64
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V71 (The Prophet)", layout="wide", page_icon="🔮")
+st.set_page_config(page_title="Sistema Quant V72 (The Publisher)", layout="wide", page_icon="🖨️")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
     .thesis-card {background-color: #1a1a2e; border-left: 4px solid #7b2cbf; padding: 20px; border-radius: 8px;}
-    .prediction-box {background-color: #112b1b; border: 1px solid #00ff00; padding: 15px; border-radius: 5px; text-align: center;}
-    .risk-box {background-color: #3d0e0e; border: 1px solid #ff0000; padding: 15px; border-radius: 5px; text-align: center;}
+    .pdf-btn {text-align: center; margin-top: 20px;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -40,92 +41,74 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR MONTE CARLO (NUEVO V71) ---
-def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
-    """Genera 100 caminos futuros posibles basados en volatilidad histórica"""
-    try:
-        # 1. Datos Históricos
-        data = yf.Ticker(ticker).history(period="1y")['Close']
-        if data.empty: return None
-        
-        returns = data.pct_change().dropna()
-        mu = returns.mean()
-        sigma = returns.std()
-        start_price = data.iloc[-1]
-        
-        # 2. Generar Caminos Aleatorios (Vectorizado para velocidad)
-        # Formula: P_t = P_t-1 * exp((mu - 0.5*sigma^2) + sigma * Z)
-        dt = 1
-        sim_paths = np.zeros((dias, simulaciones))
-        sim_paths[0] = start_price
-        
-        for t in range(1, dias):
-            drift = (mu - 0.5 * sigma**2) * dt
-            shock = sigma * np.sqrt(dt) * np.random.normal(0, 1, simulaciones)
-            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
-            
-        # 3. Estadísticas Finales
-        final_prices = sim_paths[-1]
-        mean_price = np.mean(final_prices)
-        prob_up = np.mean(final_prices > start_price) * 100
-        var_95 = np.percentile(final_prices, 5) # Value at Risk (Peor caso 5%)
-        
-        # Fechas futuras
-        last_date = data.index[-1]
-        dates = [last_date + timedelta(days=i) for i in range(dias)]
-        
-        return {
-            "Paths": sim_paths,
-            "Dates": dates,
-            "Mean_Price": mean_price,
-            "Prob_Suba": prob_up,
-            "VaR_95": var_95,
-            "Start_Price": start_price,
-            "Upside_Avg": ((mean_price - start_price)/start_price)*100
-        }
-    except Exception as e: return None
+# --- MOTOR DE REPORTES PDF (NUEVO V72) ---
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'Informe de Inteligencia de Inversion - Sistema Quant', 0, 1, 'C')
+        self.ln(5)
 
-# --- MOTOR FUNDAMENTAL PREMIUM (NUEVO V71) ---
-@st.cache_data(ttl=3600)
-def obtener_fundamentales_premium(ticker):
-    """Extrae Márgenes, Liquidez y Solvencia"""
-    if "USD" in ticker: return None
-    try:
-        stock = yf.Ticker(ticker)
-        income = stock.income_stmt.T.sort_index()
-        balance = stock.balance_sheet.T.sort_index()
-        
-        if income.empty or balance.empty: return None
-        
-        # 1. Ratios de Márgenes (Evolución)
-        fechas = income.index.strftime('%Y')
-        gross_margin = (income['Gross Profit'] / income['Total Revenue']) * 100
-        operating_margin = (income['Operating Income'] / income['Total Revenue']) * 100
-        net_margin = (income['Net Income'] / income['Total Revenue']) * 100
-        
-        # 2. Ratios de Liquidez (Último Año)
-        curr_assets = balance['Total Current Assets'].iloc[-1]
-        curr_liab = balance['Total Current Liabilities'].iloc[-1]
-        inventory = balance['Inventory'].iloc[-1] if 'Inventory' in balance else 0
-        
-        current_ratio = curr_assets / curr_liab
-        quick_ratio = (curr_assets - inventory) / curr_liab
-        
-        # 3. Solvencia
-        total_debt = balance['Total Debt'].iloc[-1] if 'Total Debt' in balance else 0
-        equity = balance['Stockholders Equity'].iloc[-1]
-        debt_to_equity = total_debt / equity
-        
-        return {
-            "Fechas": fechas,
-            "Margen_Bruto": gross_margin,
-            "Margen_Operativo": operating_margin,
-            "Margen_Neto": net_margin,
-            "Current_Ratio": current_ratio,
-            "Quick_Ratio": quick_ratio,
-            "Debt_Equity": debt_to_equity
-        }
-    except: return None
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
+
+def generar_pdf_analisis(ticker, precio, tesis, metricas_clave, prediccion):
+    """Crea un PDF con el resumen del análisis"""
+    pdf = PDFReport()
+    pdf.add_page()
+    
+    # 1. Título y Fecha
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell(0, 10, f'Analisis de Activo: {ticker}', 0, 1, 'L')
+    pdf.set_font('Arial', '', 10)
+    pdf.cell(0, 10, f'Fecha: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 0, 1, 'L')
+    pdf.line(10, 30, 200, 30)
+    
+    # 2. Snapshot
+    pdf.ln(5)
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, '1. Datos de Mercado', 0, 1)
+    pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 10, f"Precio Actual: ${precio:.2f}", 0, 1)
+    if metricas_clave:
+        pdf.cell(0, 10, f"RSI (14): {metricas_clave.get('RSI', 'N/A')}", 0, 1)
+        pdf.cell(0, 10, f"Beta: {metricas_clave.get('Beta', 'N/A')}", 0, 1)
+    
+    # 3. Tesis de Inversión
+    pdf.ln(5)
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, '2. Tesis de Inversion (IA & Quant)', 0, 1)
+    pdf.set_font('Arial', 'B', 14)
+    # Color coding simulado con texto
+    veredicto = tesis['Veredicto']
+    pdf.set_text_color(0, 128, 0) if "COMPRA" in veredicto else pdf.set_text_color(255, 0, 0)
+    pdf.cell(0, 10, f"VEREDICTO: {veredicto}", 0, 1)
+    pdf.set_text_color(0, 0, 0) # Reset color
+    
+    pdf.set_font('Arial', '', 10)
+    pdf.multi_cell(0, 5, "Argumentos a Favor (Bullish):")
+    for p in tesis['Pros']: pdf.cell(0, 5, f" + {p}", 0, 1)
+    pdf.ln(2)
+    pdf.multi_cell(0, 5, "Riesgos (Bearish):")
+    for c in tesis['Contras']: pdf.cell(0, 5, f" - {c}", 0, 1)
+    
+    # 4. Proyección
+    if prediccion:
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(0, 10, '3. Proyeccion Monte Carlo (30 dias)', 0, 1)
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 10, f"Precio Objetivo Promedio: ${prediccion['Mean_Price']:.2f}", 0, 1)
+        pdf.cell(0, 10, f"Probabilidad de Suba: {prediccion['Prob_Suba']:.1f}%", 0, 1)
+        pdf.cell(0, 10, f"Riesgo (VaR 95%): ${prediccion['VaR_95']:.2f}", 0, 1)
+
+    # Disclaimer
+    pdf.ln(10)
+    pdf.set_font('Arial', 'I', 8)
+    pdf.multi_cell(0, 5, "Nota: Este informe es generado automaticamente por un sistema cuantitativo con fines educativos. No constituye asesoramiento financiero profesional.")
+    
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- MOTOR SQL ---
 def init_db():
@@ -168,7 +151,21 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTORES RESTAURADOS ---
+# --- MOTORES DE ANÁLISIS ---
+def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
+    try:
+        data = yf.Ticker(ticker).history(period="1y")['Close']
+        if data.empty: return None
+        returns = data.pct_change().dropna()
+        mu = returns.mean(); sigma = returns.std(); start_price = data.iloc[-1]
+        sim_paths = np.zeros((dias, simulaciones)); sim_paths[0] = start_price
+        for t in range(1, dias):
+            drift = (mu - 0.5 * sigma**2); shock = sigma * np.random.normal(0, 1, simulaciones)
+            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
+        final = sim_paths[-1]
+        return {"Paths": sim_paths, "Dates": [data.index[-1]+timedelta(days=i) for i in range(dias)], "Mean_Price": np.mean(final), "Prob_Suba": np.mean(final>start_price)*100, "VaR_95": np.percentile(final, 5), "Upside": ((np.mean(final)-start_price)/start_price)*100}
+    except: return None
+
 @st.cache_data(ttl=1800)
 def obtener_datos_snapshot(ticker):
     try:
@@ -177,6 +174,40 @@ def obtener_datos_snapshot(ticker):
         try: info = stock.info
         except: info = {}
         return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50, "Volumen": info.get('volume', 0), "Beta": info.get('beta', 1.0), "Target": info.get('targetMeanPrice', 0)}
+    except: return None
+
+@st.cache_data(ttl=3600)
+def obtener_fundamentales_premium(ticker):
+    if "USD" in ticker: return None
+    try:
+        stock = yf.Ticker(ticker)
+        inc = stock.income_stmt.T.sort_index(); bal = stock.balance_sheet.T.sort_index()
+        if inc.empty or bal.empty: return None
+        gm = (inc['Gross Profit']/inc['Total Revenue'])*100; nm = (inc['Net Income']/inc['Total Revenue'])*100
+        cr = bal['Total Current Assets'].iloc[-1]/bal['Total Current Liabilities'].iloc[-1]
+        de = bal.get('Total Debt', pd.Series(0)).iloc[-1]/bal['Stockholders Equity'].iloc[-1]
+        return {"Fechas": inc.index.strftime('%Y'), "Margen_Bruto": gm, "Margen_Neto": nm, "Current": cr, "Debt": de}
+    except: return None
+
+def generar_tesis_automatica(ticker, datos_tecnicos, datos_fundamentales, prediccion):
+    puntos_bull = []; puntos_bear = []
+    if datos_tecnicos['RSI'] < 30: puntos_bull.append("Sobreventa (RSI)")
+    elif datos_tecnicos['RSI'] > 70: puntos_bear.append("Sobrecompra (RSI)")
+    if prediccion and prediccion['Prob_Suba'] > 60: puntos_bull.append(f"Monte Carlo Alcista ({prediccion['Prob_Suba']:.0f}%)")
+    if datos_fundamentales and datos_fundamentales.get('Current', 0) > 1.5: puntos_bull.append("Solvencia Sólida")
+    score = len(puntos_bull) - len(puntos_bear)
+    veredicto = "COMPRA FUERTE 🟢" if score >= 2 else "COMPRA 🟢" if score > 0 else "NEUTRAL 🟡"
+    return {"Veredicto": veredicto, "Pros": puntos_bull, "Contras": puntos_bear}
+
+def graficar_simple(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
+        if df.empty: return None
+        df['SMA50'] = ta.sma(df['Close'], 50)
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='yellow'), name='SMA 50'))
+        fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
     except: return None
 
 @st.cache_data(ttl=1800)
@@ -203,29 +234,6 @@ def escanear_mercado_completo(tickers):
         except: pass
     return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
 
-def calcular_dcf_rapido(ticker):
-    if "USD" in ticker: return None
-    try:
-        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
-        if fcf <= 0: return None
-        pv = 0; g=0.1; w=0.09
-        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
-        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
-        return (pv + pv_term) / i.get('sharesOutstanding', 1)
-    except: return None
-
-def graficar_simple(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
-        if df.empty: return None
-        df['SMA50'] = ta.sma(df['Close'], 50)
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='yellow'), name='SMA 50'))
-        fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
-    except: return None
-
-@st.cache_data(ttl=600)
 def calcular_factores_quant_single(ticker):
     try:
         stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True); info = stock.info
@@ -248,9 +256,9 @@ def dibujar_radar_factores(scores):
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
     return fig
 
-# --- INTERFAZ V71 ---
+# --- INTERFAZ V72 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("🔮 Quant Terminal V71: The Prophet")
+with c1: st.title("🖨️ Quant Terminal V72: The Publisher")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
 snap = obtener_datos_snapshot(sel_ticker)
@@ -272,96 +280,47 @@ with col_main:
     fig_chart = graficar_simple(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    tabs_detail = st.tabs(["🔮 Predicción Monte Carlo", "📚 Estados Financieros Premium", "📝 Tesis IA"])
+    tabs_detail = st.tabs(["🔮 Monte Carlo", "📚 Fundamentales", "📝 Tesis & Reporte"])
     
-    # --- TAB 1: MONTE CARLO (NUEVO V71) ---
+    # Pre-calculos para tesis y PDF
+    mc = simulacion_monte_carlo(sel_ticker)
+    fund = obtener_fundamentales_premium(sel_ticker)
+    
     with tabs_detail[0]:
-        st.subheader("🔮 Simulación Estocástica (30 Días)")
-        with st.spinner("Ejecutando 100 simulaciones..."):
-            mc = simulacion_monte_carlo(sel_ticker)
-            
-            if mc:
-                c_mc1, c_mc2 = st.columns(2)
-                
-                # Caja de Probabilidad
-                color_prob = "green" if mc['Prob_Suba'] > 50 else "red"
-                with c_mc1:
-                    st.markdown(f"""
-                    <div class='prediction-box'>
-                        <h3>Probabilidad de Suba</h3>
-                        <h1 style='color:{color_prob}'>{mc['Prob_Suba']:.1f}%</h1>
-                        <p>Precio Promedio Esperado: ${mc['Mean_Price']:.2f}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                # Caja de Riesgo (VaR)
-                with c_mc2:
-                    st.markdown(f"""
-                    <div class='risk-box'>
-                        <h3>Riesgo (VaR 95%)</h3>
-                        <h1>${mc['VaR_95']:.2f}</h1>
-                        <p>En el peor 5% de los casos, el precio cae hasta aquí.</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                # Gráfico Espagueti
-                fig_mc = go.Figure()
-                # Dibujar las primeras 30 simulaciones para no saturar
-                for i in range(30):
-                    fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=mc['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
-                
-                # Dibujar Promedio
-                fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=np.mean(mc['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
-                
-                fig_mc.update_layout(title="Simulación de 30 escenarios posibles", template="plotly_dark", height=300)
-                st.plotly_chart(fig_mc, use_container_width=True)
-            else: st.warning("Datos insuficientes para simulación.")
+        if mc:
+            c_mc1, c_mc2 = st.columns(2)
+            c_mc1.metric("Probabilidad Suba", f"{mc['Prob_Suba']:.1f}%")
+            c_mc2.metric("Riesgo VaR 95%", f"${mc['VaR_95']:.2f}")
+            fig_mc = go.Figure()
+            for i in range(20):
+                fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=mc['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
+            fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=np.mean(mc['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
+            fig_mc.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0)); st.plotly_chart(fig_mc, use_container_width=True)
+        else: st.warning("Datos insuficientes.")
 
-    # --- TAB 2: FUNDAMENTALES PREMIUM (NUEVO V71) ---
     with tabs_detail[1]:
-        st.subheader("📊 Salud Financiera Profunda")
-        fund_prem = obtener_fundamentales_premium(sel_ticker)
-        
-        if fund_prem:
-            # 1. Gráfico de Márgenes
-            st.markdown("#### Evolución de Márgenes (%)")
+        if fund:
             fig_marg = go.Figure()
-            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Bruto'], name='Bruto', line=dict(color='cyan')))
-            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Operativo'], name='Operativo', line=dict(color='orange')))
-            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Neto'], name='Neto', line=dict(color='green')))
-            fig_marg.update_layout(height=250, template="plotly_dark")
-            st.plotly_chart(fig_marg, use_container_width=True)
-            
-            # 2. Tabla de Ratios
-            st.markdown("#### Ratios de Liquidez y Solvencia")
-            col_r1, col_r2, col_r3 = st.columns(3)
-            col_r1.metric("Current Ratio", f"{fund_prem['Current_Ratio']:.2f}", help="> 1.5 es ideal")
-            col_r2.metric("Quick Ratio", f"{fund_prem['Quick_Ratio']:.2f}", help="Liquidez ácida (sin inventario)")
-            col_r3.metric("Deuda/Patrimonio", f"{fund_prem['Debt_Equity']:.2f}", help="< 1.0 es ideal")
-            
-        else: st.info("Solo disponible para Acciones (No ETFs/Cripto).")
+            fig_marg.add_trace(go.Scatter(x=fund['Fechas'], y=fund['Margen_Neto'], name='Margen Neto', line=dict(color='green')))
+            fig_marg.update_layout(height=250, template="plotly_dark", title="Margen Neto (%)"); st.plotly_chart(fig_marg, use_container_width=True)
+            c_r1, c_r2 = st.columns(2)
+            c_r1.metric("Liquidez", f"{fund['Current']:.2f}")
+            c_r2.metric("Deuda/Patrimonio", f"{fund['Debt']:.2f}")
+        else: st.info("Solo Acciones.")
 
-    # --- TAB 3: TESIS IA MEJORADA ---
     with tabs_detail[2]:
-        st.subheader("📝 Tesis de Inversión IA 2.0")
-        if st.button("🤖 Generar Tesis con Monte Carlo"):
-            with st.spinner("Analizando probabilidades y ratios..."):
-                # Construir Prompt Rico
-                prompt = f"""
-                Actúa como un Analista Senior de Fondo de Cobertura. Analiza {sel_ticker}.
-                DATOS TÉCNICOS: Precio ${snap['Precio']:.2f}, RSI {snap['RSI']}.
-                SIMULACIÓN MONTE CARLO: Probabilidad de suba {mc['Prob_Suba'] if mc else 'N/A'}%, Precio esperado ${mc['Mean_Price'] if mc else 'N/A'}.
-                FUNDAMENTALES: (Si aplica) Margen Neto reciente, Deuda.
-                
-                Escribe una tesis de inversión de 3 párrafos:
-                1. Situación Técnica y de Mercado.
-                2. Salud Financiera (Interpreta márgenes y deuda).
-                3. Veredicto basado en probabilidades (Monte Carlo).
-                """
-                try: 
-                    res = model.generate_content(prompt).text
-                    st.markdown(f"<div class='thesis-card'>{res}</div>", unsafe_allow_html=True)
-                except: st.error("Error de conexión con Gemini AI.")
+        st.subheader("📝 Generador de Informes")
+        tesis = generar_tesis_automatica(sel_ticker, {"RSI": snap['RSI'], "Precio": snap['Precio'], "SMA200": 0}, fund, mc)
+        
+        st.markdown(f"<div class='thesis-card'><h3>{tesis['Veredicto']}</h3></div>", unsafe_allow_html=True)
+        
+        # BOTÓN GENERAR PDF
+        if st.button("📄 DESCARGAR INFORME PDF"):
+            with st.spinner("Maquetando documento..."):
+                pdf_bytes = generar_pdf_analisis(sel_ticker, snap['Precio'], tesis, snap, mc)
+                b64 = base64.b64encode(pdf_bytes).decode()
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="Informe_{sel_ticker}.pdf" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: block; text-align: center; margin-top: 20px;">📥 CLIC PARA DESCARGAR PDF</a>'
+                st.markdown(href, unsafe_allow_html=True)
 
 with col_side:
     st.subheader("🧬 Perfil Quant")
@@ -375,7 +334,7 @@ with col_side:
             if snap: registrar_operacion_sql(sel_ticker, q_side, q_qty, snap['Precio']); st.success("Orden Enviada!")
         
     st.markdown("---")
-    st.subheader("🏆 Ranking Mercado")
+    st.subheader("🏆 Ranking")
     if st.button("🔄 ESCANEAR"):
         st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
         
