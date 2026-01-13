@@ -16,17 +16,19 @@ import requests
 from datetime import datetime, timedelta
 from scipy.stats import norm 
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestClassifier # <--- CEREBRO ML
+from sklearn.metrics import accuracy_score
 import google.generativeai as genai
 from fpdf import FPDF
 import base64
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V78 (The Technician)", layout="wide", page_icon="🕯️")
+st.set_page_config(page_title="Sistema Quant V79 (The Oracle)", layout="wide", page_icon="🤖")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .pattern-card {background-color: #1a2634; border: 1px solid #FFD700; padding: 10px; border-radius: 5px; margin-bottom: 5px;}
+    .ml-card {background-color: #1a1a2e; border: 1px solid #9c27b0; padding: 15px; border-radius: 8px; text-align: center;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -40,109 +42,56 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR DE PATRONES DE VELAS (NUEVO V78) ---
-def detectar_patrones_avanzados(df):
-    """Detecta Martillos, Estrellas Fugaces, Dojis y Engulfing"""
-    if df.empty: return df
-    
-    # Cálculos Geométricos
-    df['Cuerpo'] = abs(df['Close'] - df['Open'])
-    df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
-    df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
-    df['Cuerpo_Prom'] = df['Cuerpo'].rolling(10).mean()
-    
-    # 1. DOJI (Cuerpo minúsculo)
-    df['Patron_Doji'] = df['Cuerpo'] <= (df['High'] - df['Low']) * 0.1
-    
-    # 2. MARTILLO (HAMMER) - Alcista
-    # Mecha inferior > 2x Cuerpo | Mecha superior pequeña
-    df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & \
-                            (df['Mecha_Sup'] < 0.5 * df['Cuerpo']) & \
-                            (df['Close'] < df['Close'].shift(3)) # Contexto: Viene bajando
-                            
-    # 3. ESTRELLA FUGAZ (SHOOTING STAR) - Bajista
-    # Mecha superior > 2x Cuerpo | Mecha inferior pequeña
-    df['Patron_ShootingStar'] = (df['Mecha_Sup'] > 2 * df['Cuerpo']) & \
-                                (df['Mecha_Inf'] < 0.5 * df['Cuerpo']) & \
-                                (df['Close'] > df['Close'].shift(3)) # Contexto: Viene subiendo
-
-    # 4. BULLISH ENGULFING (Envolvente Alcista)
-    df['Patron_BullEng'] = (df['Close'] > df['Open']) & \
-                           (df['Close'].shift(1) < df['Open'].shift(1)) & \
-                           (df['Close'] > df['Open'].shift(1)) & \
-                           (df['Open'] < df['Close'].shift(1))
-
-    return df
-
-@st.cache_data(ttl=1800)
-def escanear_patrones_hoy(tickers):
-    """Escanea toda la lista buscando patrones activos HOY"""
-    alertas = []
+# --- MOTOR MACHINE LEARNING (NUEVO V79) ---
+def entrenar_modelo_ml(ticker):
+    """Entrena un Random Forest para predecir si el precio sube o baja mañana"""
     try:
-        data = yf.download(" ".join(tickers), period="30d", group_by='ticker', progress=False, auto_adjust=True)
-    except: return []
-    
-    for t in tickers:
-        try:
-            df = data[t].dropna() if len(tickers)>1 else data.dropna()
-            if df.empty: continue
-            
-            df = detectar_patrones_avanzados(df)
-            last = df.iloc[-1]
-            
-            if last['Patron_Martillo']: alertas.append({"Ticker": t, "Patron": "🔨 Martillo (Rebote)", "Tipo": "Alcista"})
-            if last['Patron_BullEng']: alertas.append({"Ticker": t, "Patron": "🔼 Envolvente Alcista", "Tipo": "Alcista"})
-            if last['Patron_ShootingStar']: alertas.append({"Ticker": t, "Patron": "💫 Estrella Fugaz (Caída)", "Tipo": "Bajista"})
-            if last['Patron_Doji']: alertas.append({"Ticker": t, "Patron": "➖ Doji (Indecisión)", "Tipo": "Neutral"})
-            
-        except: pass
-    return alertas
-
-# --- GRÁFICO TÉCNICO V78 ---
-def graficar_pro_v78(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
-        if df.empty: return None
+        # 1. Preparar Datos
+        df = yf.Ticker(ticker).history(period="2y")
+        if len(df) < 200: return None
         
-        # Procesar patrones
-        df = detectar_patrones_avanzados(df)
-        df['SMA50'] = ta.sma(df['Close'], 50)
-        df['SMA200'] = ta.sma(df['Close'], 200)
+        # 2. Feature Engineering (Variables para que la IA aprenda)
+        df['RSI'] = ta.rsi(df['Close'], 14)
+        df['SMA_Diff'] = (df['Close'] - ta.sma(df['Close'], 50)) / ta.sma(df['Close'], 50)
+        df['Vol_Change'] = df['Volume'].pct_change()
+        df['Return'] = df['Close'].pct_change()
         
-        # Filtrar puntos para graficar (solo True)
-        martillos = df[df['Patron_Martillo']]
-        estrellas = df[df['Patron_ShootingStar']]
-        dojis = df[df['Patron_Doji']]
-        bull_eng = df[df['Patron_BullEng']]
+        # Variable Objetivo (Target): 1 si mañana sube, 0 si baja
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
         
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        df = df.dropna()
         
-        # Velas
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
+        # 3. Features (X) y Target (y)
+        features = ['RSI', 'SMA_Diff', 'Vol_Change', 'Return']
+        X = df[features]
+        y = df['Target']
         
-        # Medias
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='cyan', width=1), name='SMA 50'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA200'], line=dict(color='yellow', width=1), name='SMA 200'), row=1, col=1)
+        # Split Train/Test (Últimos 100 días para testear)
+        split = int(len(df) * 0.8)
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        y_train, y_test = y.iloc[:split], y.iloc[split:]
         
-        # --- MARCADORES DE PATRONES ---
-        # Martillo (Verde Diamante Debajo)
-        fig.add_trace(go.Scatter(x=martillos.index, y=martillos['Low']*0.98, mode='markers', marker=dict(symbol='diamond', size=10, color='#00ff00'), name='Martillo'), row=1, col=1)
+        # 4. Entrenar Modelo
+        clf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
+        clf.fit(X_train, y_train)
         
-        # Estrella Fugaz (Rojo Diamante Arriba)
-        fig.add_trace(go.Scatter(x=estrellas.index, y=estrellas['High']*1.02, mode='markers', marker=dict(symbol='diamond', size=10, color='#ff0000'), name='Estrella Fugaz'), row=1, col=1)
+        # 5. Evaluar Precisión
+        preds = clf.predict(X_test)
+        acc = accuracy_score(y_test, preds)
         
-        # Bullish Engulfing (Triángulo Arriba)
-        fig.add_trace(go.Scatter(x=bull_eng.index, y=bull_eng['Low']*0.97, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00cc96'), name='Bullish Engulfing'), row=1, col=1)
+        # 6. Predicción para MAÑANA
+        last_data = X.iloc[[-1]]
+        prediction = clf.predict(last_data)[0]
+        prob = clf.predict_proba(last_data)[0][prediction] # Certeza del modelo
         
-        # Doji (Cruz Amarilla)
-        fig.add_trace(go.Scatter(x=dojis.index, y=dojis['High']*1.01, mode='markers', marker=dict(symbol='cross', size=8, color='yellow'), name='Doji'), row=1, col=1)
+        return {
+            "Prediccion": "SUBE 🟢" if prediction == 1 else "BAJA 🔴",
+            "Accuracy": acc * 100,
+            "Probabilidad": prob * 100,
+            "Features": features
+        }
         
-        # Volumen
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='rgba(100, 100, 100, 0.5)', name='Volumen'), row=2, col=1)
-        
-        fig.update_layout(template="plotly_dark", height=550, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
-        return fig
-    except: return None
+    except Exception as e: return None
 
 # --- MOTORES EXISTENTES ---
 @st.cache_data(ttl=1800)
@@ -153,6 +102,32 @@ def obtener_datos_snapshot(ticker):
         try: info = stock.info
         except: info = {}
         return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50, "Volumen": info.get('volume', 0), "Beta": info.get('beta', 1.0), "Target": info.get('targetMeanPrice', 0)}
+    except: return None
+
+def detectar_patrones_avanzados(df):
+    if df.empty: return df
+    df['Cuerpo'] = abs(df['Close'] - df['Open'])
+    df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
+    df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
+    df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & (df['Mecha_Sup'] < 0.5 * df['Cuerpo'])
+    df['Patron_BullEng'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Close'] > df['Open'].shift(1)) & (df['Open'] < df['Close'].shift(1))
+    return df
+
+def graficar_pro_v78(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
+        if df.empty: return None
+        df = detectar_patrones_avanzados(df)
+        df['SMA50'] = ta.sma(df['Close'], 50); df['SMA200'] = ta.sma(df['Close'], 200)
+        martillos = df[df['Patron_Martillo']]
+        bull_eng = df[df['Patron_BullEng']]
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='cyan', width=1), name='SMA 50'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=martillos.index, y=martillos['Low']*0.98, mode='markers', marker=dict(symbol='diamond', size=10, color='#00ff00'), name='Martillo'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=bull_eng.index, y=bull_eng['Low']*0.97, mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00cc96'), name='Bullish Engulfing'), row=1, col=1)
+        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='rgba(100, 100, 100, 0.5)', name='Volumen'), row=2, col=1)
+        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
     except: return None
 
 @st.cache_data(ttl=3600)
@@ -204,9 +179,9 @@ def auditar_posiciones_sql():
     return pd.DataFrame(res)
 init_db()
 
-# --- INTERFAZ V78 ---
+# --- INTERFAZ V79 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("🕯️ Quant Terminal V78: The Technician")
+with c1: st.title("🤖 Quant Terminal V79: The Oracle")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
 snap = obtener_datos_snapshot(sel_ticker)
@@ -221,48 +196,67 @@ if snap:
 
 st.divider()
 
-# --- SIDEBAR: SCANNER DE PATRONES (NUEVO V78) ---
-with st.sidebar:
-    st.header("🔍 Scanner de Patrones")
-    st.caption("Detectando Martillos, Dojis y Estrellas Fugaces hoy...")
-    if st.button("🔄 ESCANEAR VELAS"):
-        with st.spinner("Analizando geometría de velas..."):
-            patrones_hoy = escanear_patrones_hoy(WATCHLIST)
-            if patrones_hoy:
-                for p in patrones_hoy:
-                    color = "bull-pattern" if "Alcista" in p['Tipo'] else "bear-pattern" if "Bajista" in p['Tipo'] else "white"
-                    st.markdown(f"""
-                    <div class='pattern-card'>
-                        <b>{p['Ticker']}</b>
-                        <br><span class='{color}'>{p['Patron']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("Ningún patrón relevante detectado al cierre de hoy.")
-
 col_main, col_side = st.columns([2, 1])
 
 with col_main:
-    # GRÁFICO TÉCNICO AVANZADO V78
-    st.subheader("📉 Gráfico Técnico + Patrones")
-    st.caption("Leyenda: 🟢 Martillo | 🔴 Estrella Fugaz | ➕ Doji | ▲ Bullish Engulfing")
+    st.subheader("📉 Acción del Precio")
     fig_chart = graficar_pro_v78(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    tabs_detail = st.tabs(["🦈 Institucionales", "📝 IA"])
+    tabs_detail = st.tabs(["🤖 ORÁCULO ML", "🦈 Institucionales", "📝 IA"])
     
+    # --- TAB 1: MACHINE LEARNING (NUEVO V79) ---
     with tabs_detail[0]:
+        st.subheader("🤖 Predicción por Inteligencia Artificial (Random Forest)")
+        st.caption("El modelo analiza patrones complejos (RSI, Volumen, Tendencia) de los últimos 2 años.")
+        
+        if st.button("🧠 ENTRENAR MODELO & PREDECIR"):
+            with st.spinner(f"Entrenando red neuronal para {sel_ticker}..."):
+                ml_result = entrenar_modelo_ml(sel_ticker)
+                
+                if ml_result:
+                    c_ml1, c_ml2 = st.columns(2)
+                    
+                    # Tarjeta de Predicción
+                    color_pred = "#00ff00" if "SUBE" in ml_result['Prediccion'] else "#ff4b4b"
+                    with c_ml1:
+                        st.markdown(f"""
+                        <div class='ml-card' style='border-color: {color_pred}'>
+                            <h4 style='color: #fff'>El Oráculo Predice:</h4>
+                            <h1 style='color: {color_pred}'>{ml_result['Prediccion']}</h1>
+                            <p>Certeza del Modelo: {ml_result['Probabilidad']:.1f}%</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                    # Tarjeta de Calidad del Modelo
+                    with c_ml2:
+                        acc = ml_result['Accuracy']
+                        color_acc = "green" if acc > 55 else "orange" if acc > 50 else "red"
+                        st.markdown(f"""
+                        <div class='metric-card'>
+                            <h4>Precisión Histórica (Backtest)</h4>
+                            <h2 style='color: {color_acc}'>{acc:.1f}%</h2>
+                            <small>¿Qué tan bueno es este modelo con {sel_ticker}?</small>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                    st.info(f"🧠 Variables analizadas por la IA: {', '.join(ml_result['Features'])}")
+                    if ml_result['Accuracy'] < 50:
+                        st.warning("⚠️ Precaución: La precisión histórica es baja (<50%). El mercado está errático.")
+                else:
+                    st.error("Datos insuficientes para entrenar ML.")
+
+    with tabs_detail[1]:
         insider = obtener_datos_insider(sel_ticker)
         if insider:
             c1, c2 = st.columns(2)
             c1.metric("Institucional", f"{insider['Institucional']:.1f}%")
             c2.metric("Short Float", f"{insider['Short_Float']:.2f}%", delta_color="inverse")
-            if insider['Short_Float'] > 5: st.warning("⚠️ Alta cantidad de apuestas en contra (Shorts).")
         else: st.info("Datos no disponibles.")
 
-    with tabs_detail[1]:
+    with tabs_detail[2]:
         if st.button("Generar Informe IA"):
-            try: st.write(model.generate_content(f"Analisis tecnico de velas para {sel_ticker} hoy").text)
+            try: st.write(model.generate_content(f"Analisis {sel_ticker}").text)
             except: st.error("Error IA")
 
 with col_side:
