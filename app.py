@@ -14,16 +14,19 @@ import math
 import time
 import requests 
 from datetime import datetime, timedelta
+from scipy.stats import norm 
 from sklearn.linear_model import LinearRegression
 import google.generativeai as genai
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V70 (The CFO)", layout="wide", page_icon="📚")
+st.set_page_config(page_title="Sistema Quant V71 (The Prophet)", layout="wide", page_icon="🔮")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .fin-table {font-size: 12px;}
+    .thesis-card {background-color: #1a1a2e; border-left: 4px solid #7b2cbf; padding: 20px; border-radius: 8px;}
+    .prediction-box {background-color: #112b1b; border: 1px solid #00ff00; padding: 15px; border-radius: 5px; text-align: center;}
+    .risk-box {background-color: #3d0e0e; border: 1px solid #ff0000; padding: 15px; border-radius: 5px; text-align: center;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -37,63 +40,92 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR DE DATOS FINANCIEROS DETALLADOS (NUEVO V70) ---
+# --- MOTOR MONTE CARLO (NUEVO V71) ---
+def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
+    """Genera 100 caminos futuros posibles basados en volatilidad histórica"""
+    try:
+        # 1. Datos Históricos
+        data = yf.Ticker(ticker).history(period="1y")['Close']
+        if data.empty: return None
+        
+        returns = data.pct_change().dropna()
+        mu = returns.mean()
+        sigma = returns.std()
+        start_price = data.iloc[-1]
+        
+        # 2. Generar Caminos Aleatorios (Vectorizado para velocidad)
+        # Formula: P_t = P_t-1 * exp((mu - 0.5*sigma^2) + sigma * Z)
+        dt = 1
+        sim_paths = np.zeros((dias, simulaciones))
+        sim_paths[0] = start_price
+        
+        for t in range(1, dias):
+            drift = (mu - 0.5 * sigma**2) * dt
+            shock = sigma * np.sqrt(dt) * np.random.normal(0, 1, simulaciones)
+            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
+            
+        # 3. Estadísticas Finales
+        final_prices = sim_paths[-1]
+        mean_price = np.mean(final_prices)
+        prob_up = np.mean(final_prices > start_price) * 100
+        var_95 = np.percentile(final_prices, 5) # Value at Risk (Peor caso 5%)
+        
+        # Fechas futuras
+        last_date = data.index[-1]
+        dates = [last_date + timedelta(days=i) for i in range(dias)]
+        
+        return {
+            "Paths": sim_paths,
+            "Dates": dates,
+            "Mean_Price": mean_price,
+            "Prob_Suba": prob_up,
+            "VaR_95": var_95,
+            "Start_Price": start_price,
+            "Upside_Avg": ((mean_price - start_price)/start_price)*100
+        }
+    except Exception as e: return None
+
+# --- MOTOR FUNDAMENTAL PREMIUM (NUEVO V71) ---
 @st.cache_data(ttl=3600)
-def obtener_datos_financieros_profundos(ticker):
-    """Extrae Balances y Estados de Resultados Anuales"""
-    if "USD" in ticker: return None # No aplica a Crypto
+def obtener_fundamentales_premium(ticker):
+    """Extrae Márgenes, Liquidez y Solvencia"""
+    if "USD" in ticker: return None
     try:
         stock = yf.Ticker(ticker)
-        
-        # 1. Estados Financieros Anuales
-        income = stock.income_stmt
-        balance = stock.balance_sheet
-        cashflow = stock.cashflow
+        income = stock.income_stmt.T.sort_index()
+        balance = stock.balance_sheet.T.sort_index()
         
         if income.empty or balance.empty: return None
         
-        # Transponer para que las fechas sean filas (mejor para graficar)
-        income = income.T.sort_index()
-        balance = balance.T.sort_index()
-        
-        # Extraer métricas clave (Manejo de errores si faltan columnas)
+        # 1. Ratios de Márgenes (Evolución)
         fechas = income.index.strftime('%Y')
+        gross_margin = (income['Gross Profit'] / income['Total Revenue']) * 100
+        operating_margin = (income['Operating Income'] / income['Total Revenue']) * 100
+        net_margin = (income['Net Income'] / income['Total Revenue']) * 100
         
-        # Safe get para columnas que a veces tienen nombres distintos
-        ingresos = income['Total Revenue'] if 'Total Revenue' in income else income.iloc[:, 0]
-        net_income = income['Net Income'] if 'Net Income' in income else pd.Series(0, index=income.index)
+        # 2. Ratios de Liquidez (Último Año)
+        curr_assets = balance['Total Current Assets'].iloc[-1]
+        curr_liab = balance['Total Current Liabilities'].iloc[-1]
+        inventory = balance['Inventory'].iloc[-1] if 'Inventory' in balance else 0
         
-        # Datos para DuPont
-        equity = balance['Stockholders Equity'] if 'Stockholders Equity' in balance else pd.Series(1, index=balance.index)
-        assets = balance['Total Assets'] if 'Total Assets' in balance else pd.Series(1, index=balance.index)
+        current_ratio = curr_assets / curr_liab
+        quick_ratio = (curr_assets - inventory) / curr_liab
         
-        # Cálculo DuPont (Último Año)
-        last_net_income = net_income.iloc[-1]
-        last_revenue = ingresos.iloc[-1]
-        last_assets = assets.iloc[-1]
-        last_equity = equity.iloc[-1]
-        
-        margen_neto = (last_net_income / last_revenue)
-        rotacion_activos = (last_revenue / last_assets)
-        apalancamiento = (last_assets / last_equity)
-        roe = margen_neto * rotacion_activos * apalancamiento
+        # 3. Solvencia
+        total_debt = balance['Total Debt'].iloc[-1] if 'Total Debt' in balance else 0
+        equity = balance['Stockholders Equity'].iloc[-1]
+        debt_to_equity = total_debt / equity
         
         return {
             "Fechas": fechas,
-            "Ingresos": ingresos,
-            "Net_Income": net_income,
-            "Assets": assets,
-            "Equity": equity,
-            "DuPont": {
-                "Margen Neto": margen_neto * 100,
-                "Rotación Activos": rotacion_activos,
-                "Apalancamiento": apalancamiento,
-                "ROE": roe * 100
-            },
-            "Holders": stock.major_holders,
-            "Raw_Income": income.iloc[-3:].T, # Últimos 3 años raw
+            "Margen_Bruto": gross_margin,
+            "Margen_Operativo": operating_margin,
+            "Margen_Neto": net_margin,
+            "Current_Ratio": current_ratio,
+            "Quick_Ratio": quick_ratio,
+            "Debt_Equity": debt_to_equity
         }
-    except Exception as e: return None
+    except: return None
 
 # --- MOTOR SQL ---
 def init_db():
@@ -171,23 +203,29 @@ def escanear_mercado_completo(tickers):
         except: pass
     return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
 
-def generar_proyeccion_futura(ticker, dias=30):
+def calcular_dcf_rapido(ticker):
+    if "USD" in ticker: return None
     try:
-        df = yf.Ticker(ticker).history(period="1y", auto_adjust=True)
-        if df.empty: return None
-        df = df.reset_index(); df['Day'] = df.index
-        X = df[['Day']]; y = df['Close']
-        model_lr = LinearRegression(); model_lr.fit(X, y)
-        last_day = df['Day'].iloc[-1]
-        future_days = np.array(range(last_day + 1, last_day + dias + 1)).reshape(-1, 1)
-        pred = model_lr.predict(future_days)
-        std = (y - model_lr.predict(X)).std()
-        upper = pred + (1.96 * std * np.sqrt(np.arange(1, dias + 1)))
-        lower = pred - (1.96 * std * np.sqrt(np.arange(1, dias + 1)))
-        dates = [df['Date'].iloc[-1] + timedelta(days=i) for i in range(1, dias + 1)]
-        return {"Fechas": dates, "Predicción": pred, "Upper": upper, "Lower": lower, "Cambio_Pct": ((pred[-1]-y.iloc[-1])/y.iloc[-1])*100}
+        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
+        if fcf <= 0: return None
+        pv = 0; g=0.1; w=0.09
+        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
+        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
+        return (pv + pv_term) / i.get('sharesOutstanding', 1)
     except: return None
 
+def graficar_simple(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
+        if df.empty: return None
+        df['SMA50'] = ta.sma(df['Close'], 50)
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='yellow'), name='SMA 50'))
+        fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
+    except: return None
+
+@st.cache_data(ttl=600)
 def calcular_factores_quant_single(ticker):
     try:
         stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True); info = stock.info
@@ -210,20 +248,9 @@ def dibujar_radar_factores(scores):
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
     return fig
 
-def graficar_simple(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
-        if df.empty: return None
-        df['SMA50'] = ta.sma(df['Close'], 50)
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='yellow'), name='SMA 50'))
-        fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
-    except: return None
-
-# --- INTERFAZ V70 ---
+# --- INTERFAZ V71 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("📚 Quant Terminal V70: The CFO")
+with c1: st.title("🔮 Quant Terminal V71: The Prophet")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
 snap = obtener_datos_snapshot(sel_ticker)
@@ -245,59 +272,96 @@ with col_main:
     fig_chart = graficar_simple(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    # TABS DETALLE (V70: ESTADOS FINANCIEROS)
-    tabs_detail = st.tabs(["📚 Estados Financieros", "🔮 Predicción", "📝 Tesis"])
+    tabs_detail = st.tabs(["🔮 Predicción Monte Carlo", "📚 Estados Financieros Premium", "📝 Tesis IA"])
     
-    # --- PESTAÑA CFO (NUEVO V70) ---
+    # --- TAB 1: MONTE CARLO (NUEVO V71) ---
     with tabs_detail[0]:
-        st.subheader("📊 Análisis Fundamental Profundo")
-        
-        with st.spinner("Auditando libros contables..."):
-            fin_data = obtener_datos_financieros_profundos(sel_ticker)
+        st.subheader("🔮 Simulación Estocástica (30 Días)")
+        with st.spinner("Ejecutando 100 simulaciones..."):
+            mc = simulacion_monte_carlo(sel_ticker)
             
-            if fin_data:
-                # 1. Gráfico de Barras: Revenue vs Net Income
-                fig_fin = go.Figure()
-                fig_fin.add_trace(go.Bar(x=fin_data['Fechas'], y=fin_data['Ingresos'], name='Ventas (Revenue)', marker_color='#2196F3'))
-                fig_fin.add_trace(go.Bar(x=fin_data['Fechas'], y=fin_data['Net_Income'], name='Ganancia (Net Income)', marker_color='#4CAF50'))
-                fig_fin.update_layout(title="Evolución Ventas vs Ganancias (Anual)", barmode='group', template="plotly_dark", height=300)
-                st.plotly_chart(fig_fin, use_container_width=True)
+            if mc:
+                c_mc1, c_mc2 = st.columns(2)
                 
-                st.divider()
+                # Caja de Probabilidad
+                color_prob = "green" if mc['Prob_Suba'] > 50 else "red"
+                with c_mc1:
+                    st.markdown(f"""
+                    <div class='prediction-box'>
+                        <h3>Probabilidad de Suba</h3>
+                        <h1 style='color:{color_prob}'>{mc['Prob_Suba']:.1f}%</h1>
+                        <p>Precio Promedio Esperado: ${mc['Mean_Price']:.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                # 2. Análisis DuPont
-                st.subheader("🧬 Desglose DuPont (ROE)")
-                dp = fin_data['DuPont']
+                # Caja de Riesgo (VaR)
+                with c_mc2:
+                    st.markdown(f"""
+                    <div class='risk-box'>
+                        <h3>Riesgo (VaR 95%)</h3>
+                        <h1>${mc['VaR_95']:.2f}</h1>
+                        <p>En el peor 5% de los casos, el precio cae hasta aquí.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                c_dup1, c_dup2, c_dup3, c_dup4 = st.columns(4)
-                c_dup1.metric("Margen Neto", f"{dp['Margen Neto']:.1f}%", help="Eficiencia Operativa (Ganancia/Ventas)")
-                c_dup2.metric("Rotación Activos", f"{dp['Rotación Activos']:.2f}x", help="Eficiencia de Activos (Ventas/Activos)")
-                c_dup3.metric("Apalancamiento", f"{dp['Apalancamiento']:.2f}x", help="Riesgo Financiero (Activos/Patrimonio)")
-                c_dup4.metric("ROE Final", f"{dp['ROE']:.1f}%", help="Retorno sobre Patrimonio")
+                # Gráfico Espagueti
+                fig_mc = go.Figure()
+                # Dibujar las primeras 30 simulaciones para no saturar
+                for i in range(30):
+                    fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=mc['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
                 
-                st.info(f"Fórmula: {dp['Margen Neto']:.1f}% x {dp['Rotación Activos']:.2f} x {dp['Apalancamiento']:.2f} = **{dp['ROE']:.1f}% ROE**")
+                # Dibujar Promedio
+                fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=np.mean(mc['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
                 
-                # 3. Tabla Raw
-                with st.expander("Ver Estado de Resultados Completo (Raw Data)"):
-                    st.dataframe(fin_data['Raw_Income'].style.format("${:,.0f}"), use_container_width=True)
-                    
-            else:
-                st.warning("Datos financieros detallados no disponibles (Posible Cripto o ETF).")
+                fig_mc.update_layout(title="Simulación de 30 escenarios posibles", template="plotly_dark", height=300)
+                st.plotly_chart(fig_mc, use_container_width=True)
+            else: st.warning("Datos insuficientes para simulación.")
 
+    # --- TAB 2: FUNDAMENTALES PREMIUM (NUEVO V71) ---
     with tabs_detail[1]:
-        pred = generar_proyeccion_futura(sel_ticker)
-        if pred:
-            st.metric("Objetivo 30d", f"${pred['Predicción'][-1]:.2f}", f"{pred['Cambio_Pct']:+.2f}%")
-            fig_fc = go.Figure()
-            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Predicción'], mode='lines', name='Tendencia', line=dict(color='white', dash='dash')))
-            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Upper'], mode='lines', line=dict(width=0), showlegend=False))
-            fig_fc.add_trace(go.Scatter(x=pred['Fechas'], y=pred['Lower'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 255, 0.1)'))
-            fig_fc.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0)); st.plotly_chart(fig_fc, use_container_width=True)
+        st.subheader("📊 Salud Financiera Profunda")
+        fund_prem = obtener_fundamentales_premium(sel_ticker)
+        
+        if fund_prem:
+            # 1. Gráfico de Márgenes
+            st.markdown("#### Evolución de Márgenes (%)")
+            fig_marg = go.Figure()
+            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Bruto'], name='Bruto', line=dict(color='cyan')))
+            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Operativo'], name='Operativo', line=dict(color='orange')))
+            fig_marg.add_trace(go.Scatter(x=fund_prem['Fechas'], y=fund_prem['Margen_Neto'], name='Neto', line=dict(color='green')))
+            fig_marg.update_layout(height=250, template="plotly_dark")
+            st.plotly_chart(fig_marg, use_container_width=True)
+            
+            # 2. Tabla de Ratios
+            st.markdown("#### Ratios de Liquidez y Solvencia")
+            col_r1, col_r2, col_r3 = st.columns(3)
+            col_r1.metric("Current Ratio", f"{fund_prem['Current_Ratio']:.2f}", help="> 1.5 es ideal")
+            col_r2.metric("Quick Ratio", f"{fund_prem['Quick_Ratio']:.2f}", help="Liquidez ácida (sin inventario)")
+            col_r3.metric("Deuda/Patrimonio", f"{fund_prem['Debt_Equity']:.2f}", help="< 1.0 es ideal")
+            
+        else: st.info("Solo disponible para Acciones (No ETFs/Cripto).")
 
+    # --- TAB 3: TESIS IA MEJORADA ---
     with tabs_detail[2]:
-        if st.button("🤖 Generar Tesis IA"):
-            try: st.write(model.generate_content(f"Tesis de inversion para {sel_ticker} considerando fundamentales y tecnicos").text)
-            except: st.error("Sin IA")
+        st.subheader("📝 Tesis de Inversión IA 2.0")
+        if st.button("🤖 Generar Tesis con Monte Carlo"):
+            with st.spinner("Analizando probabilidades y ratios..."):
+                # Construir Prompt Rico
+                prompt = f"""
+                Actúa como un Analista Senior de Fondo de Cobertura. Analiza {sel_ticker}.
+                DATOS TÉCNICOS: Precio ${snap['Precio']:.2f}, RSI {snap['RSI']}.
+                SIMULACIÓN MONTE CARLO: Probabilidad de suba {mc['Prob_Suba'] if mc else 'N/A'}%, Precio esperado ${mc['Mean_Price'] if mc else 'N/A'}.
+                FUNDAMENTALES: (Si aplica) Margen Neto reciente, Deuda.
+                
+                Escribe una tesis de inversión de 3 párrafos:
+                1. Situación Técnica y de Mercado.
+                2. Salud Financiera (Interpreta márgenes y deuda).
+                3. Veredicto basado en probabilidades (Monte Carlo).
+                """
+                try: 
+                    res = model.generate_content(prompt).text
+                    st.markdown(f"<div class='thesis-card'>{res}</div>", unsafe_allow_html=True)
+                except: st.error("Error de conexión con Gemini AI.")
 
 with col_side:
     st.subheader("🧬 Perfil Quant")
@@ -311,7 +375,7 @@ with col_side:
             if snap: registrar_operacion_sql(sel_ticker, q_side, q_qty, snap['Precio']); st.success("Orden Enviada!")
         
     st.markdown("---")
-    st.subheader("🏆 Ranking")
+    st.subheader("🏆 Ranking Mercado")
     if st.button("🔄 ESCANEAR"):
         st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
         
