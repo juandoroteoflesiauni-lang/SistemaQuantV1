@@ -16,21 +16,25 @@ import requests
 from datetime import datetime, timedelta
 from scipy.stats import norm 
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 import google.generativeai as genai
 from fpdf import FPDF
 import base64
 
-# --- CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN DEL SISTEMA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V77 (Insider)", layout="wide", page_icon="🦈")
+st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V87", layout="wide", page_icon="🏛️")
 
 st.markdown("""<style>
-    .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .insider-card {background-color: #1a2634; border: 1px solid #2196F3; padding: 15px; border-radius: 8px;}
-    .bull-pattern {color: #00ff00; font-weight: bold;}
-    .bear-pattern {color: #ff4b4b; font-weight: bold;}
-    .stTabs [data-baseweb="tab-list"] {gap: 5px;}
-    .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
+    .main {background-color: #0e1117;}
+    .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
+    .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
+    .metric-label {font-size: 14px; color: #a0a0a0;}
+    .strat-box {background-color: #0f172a; border: 1px solid #3b82f6; border-left: 5px solid #3b82f6; padding: 25px; border-radius: 8px; margin-top: 15px; font-family: 'Segoe UI', sans-serif; line-height: 1.6;}
+    .macro-card {background-color: #2a1a1a; border: 1px solid #ff4b4b; padding: 10px; border-radius: 5px; text-align: center;}
+    .macro-safe {background-color: #1a2a1a; border: 1px solid #00cc96; padding: 10px; border-radius: 5px; text-align: center;}
+    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
 </style>""", unsafe_allow_html=True)
 
 try:
@@ -39,163 +43,28 @@ try:
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 except: pass
 
-WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
+DEFAULT_WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 
-# --- MOTOR INSTITUCIONAL (NUEVO V77) ---
-@st.cache_data(ttl=3600)
-def obtener_datos_insider(ticker):
-    """Obtiene datos de tenencia institucional y shorts"""
-    if "USD" in ticker: return None
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        # Short Interest
-        shares_short = info.get('sharesShort', 0)
-        float_shares = info.get('floatShares', 1)
-        short_percent = (shares_short / float_shares) * 100 if float_shares > 0 else 0
-        
-        # Holders
-        holders = stock.major_holders
-        inst_percent = 0
-        insider_percent = 0
-        
-        # Yahoo a veces devuelve DataFrame con índices 0, 1 o nombres directos
-        try:
-            if holders is not None and not holders.empty:
-                # Intentar parsear el formato variable de yfinance
-                df_h = holders.copy()
-                if 0 in df_h.columns and 1 in df_h.columns:
-                    # Formato antiguo
-                    for idx, row in df_h.iterrows():
-                        if 'Insiders' in str(row[1]): insider_percent = float(str(row[0]).replace('%', ''))
-                        if 'Institutions' in str(row[1]): inst_percent = float(str(row[0]).replace('%', ''))
-                else:
-                    # Formato nuevo o dict
-                    inst_percent = info.get('heldPercentInstitutions', 0) * 100
-                    insider_percent = info.get('heldPercentInsiders', 0) * 100
-        except: pass
-        
-        return {
-            "Institucional": inst_percent,
-            "Insiders": insider_percent,
-            "Short_Float": short_percent,
-            "Short_Ratio": info.get('shortRatio', 0)
-        }
-    except: return None
+if 'mis_listas' not in st.session_state:
+    st.session_state['mis_listas'] = {"General": DEFAULT_WATCHLIST, "Vigiladas": [], "Cartera": []}
+if 'lista_activa' not in st.session_state:
+    st.session_state['lista_activa'] = "General"
 
-# --- MOTOR TÉCNICO AVANZADO (PATRONES V77) ---
-def graficar_pro(ticker):
-    """Gráfico con detección de patrones de velas"""
-    try:
-        df = yf.Ticker(ticker).history(period="6mo", auto_adjust=True)
-        if df.empty: return None
-        
-        # Indicadores Base
-        df['SMA50'] = ta.sma(df['Close'], 50)
-        df['SMA200'] = ta.sma(df['Close'], 200)
-        
-        # DETECCIÓN DE PATRONES MANUAL (Para evitar dependencias pesadas de TA-Lib)
-        # 1. Bullish Engulfing (Vela verde envuelve a la roja previa)
-        df['Bull_Eng'] = (df['Close'] > df['Open']) & \
-                         (df['Close'].shift(1) < df['Open'].shift(1)) & \
-                         (df['Close'] > df['Open'].shift(1)) & \
-                         (df['Open'] < df['Close'].shift(1))
-        
-        # 2. Bearish Engulfing (Vela roja envuelve a la verde previa)
-        df['Bear_Eng'] = (df['Close'] < df['Open']) & \
-                         (df['Close'].shift(1) > df['Open'].shift(1)) & \
-                         (df['Close'] < df['Open'].shift(1)) & \
-                         (df['Open'] > df['Close'].shift(1))
-        
-        # 3. Doji (Cuerpo muy pequeño)
-        df['Doji'] = (abs(df['Close'] - df['Open']) / (df['High'] - df['Low'])) < 0.1
-        
-        # Filtrar solo los últimos eventos para el gráfico (no ensuciar todo)
-        patterns_bull = df[df['Bull_Eng'] == True]
-        patterns_bear = df[df['Bear_Eng'] == True]
-        
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        
-        # Velas
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
-        
-        # Medias Móviles
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='cyan', width=1), name='SMA 50'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA200'], line=dict(color='yellow', width=1), name='SMA 200'), row=1, col=1)
-        
-        # Marcadores de Patrones
-        fig.add_trace(go.Scatter(x=patterns_bull.index, y=patterns_bull['Low']*0.98, mode='markers', marker=dict(symbol='triangle-up', size=10, color='green'), name='Bullish Engulfing'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=patterns_bear.index, y=patterns_bear['High']*1.02, mode='markers', marker=dict(symbol='triangle-down', size=10, color='red'), name='Bearish Engulfing'), row=1, col=1)
-        
-        # Volumen
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color='rgba(100, 100, 100, 0.5)', name='Volumen'), row=2, col=1)
-        
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0))
-        return fig
-    except: return None
+# --- 2. MOTORES DE DATOS ---
 
-# --- MOTORES EXISTENTES ---
-@st.cache_data(ttl=1800)
-def obtener_datos_snapshot(ticker):
-    try:
-        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
-        if hist.empty: return None
-        try: info = stock.info
-        except: info = {}
-        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50, "Volumen": info.get('volume', 0), "Beta": info.get('beta', 1.0), "Target": info.get('targetMeanPrice', 0)}
-    except: return None
-
-@st.cache_data(ttl=3600)
-def obtener_fundamentales_premium(ticker):
-    if "USD" in ticker: return None
-    try:
-        stock = yf.Ticker(ticker); inc = stock.income_stmt.T.sort_index(); bal = stock.balance_sheet.T.sort_index()
-        if inc.empty or bal.empty: return None
-        gm = (inc['Gross Profit']/inc['Total Revenue'])*100; nm = (inc['Net Income']/inc['Total Revenue'])*100
-        cr = bal['Total Current Assets'].iloc[-1]/bal['Total Current Liabilities'].iloc[-1]
-        de = bal.get('Total Debt', pd.Series(0)).iloc[-1]/bal['Stockholders Equity'].iloc[-1]
-        return {"Fechas": inc.index.strftime('%Y'), "Margen_Bruto": gm, "Margen_Neto": nm, "Current": cr, "Debt": de}
-    except: return None
-
-def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
-    try:
-        data = yf.Ticker(ticker).history(period="1y")['Close']
-        if data.empty: return None
-        returns = data.pct_change().dropna(); mu = returns.mean(); sigma = returns.std(); start_price = data.iloc[-1]
-        sim_paths = np.zeros((dias, simulaciones)); sim_paths[0] = start_price
-        for t in range(1, dias):
-            drift = (mu - 0.5 * sigma**2); shock = sigma * np.random.normal(0, 1, simulaciones)
-            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
-        final = sim_paths[-1]
-        return {"Paths": sim_paths, "Dates": [data.index[-1]+timedelta(days=i) for i in range(dias)], "Mean_Price": np.mean(final), "Prob_Suba": np.mean(final>start_price)*100, "VaR_95": np.percentile(final, 5)}
-    except: return None
-
-def calcular_riesgo_cartera(df_posiciones):
-    if df_posiciones.empty: return None
-    try:
-        tickers = df_posiciones['Ticker'].tolist(); pesos = (df_posiciones['Valor']/df_posiciones['Valor'].sum()).values
-        data = yf.download(" ".join(tickers+['SPY']), period="1y", progress=False, auto_adjust=True)['Close']
-        ret = data.pct_change().dropna()
-        cov = ret.cov(); var_spy = ret['SPY'].var()
-        betas = [cov.loc[t, 'SPY']/var_spy for t in tickers]
-        port_beta = np.sum(np.array(betas)*pesos)
-        port_vol = np.sqrt(np.dot(pesos.T, np.dot(ret[tickers].cov(), pesos)))
-        return {"Beta_Cartera": port_beta, "VaR_95_Cash": 1.65*port_vol*df_posiciones['Valor'].sum(), "Crash": df_posiciones['Valor'].sum()*port_beta*-0.20}
-    except: return None
-
-# --- MOTOR SQL ---
 def init_db():
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, ticker TEXT, tipo TEXT, cantidad INTEGER, precio REAL, total REAL, emocion TEXT, nota TEXT)''')
     conn.commit(); conn.close()
-def registrar_operacion_sql(t, tipo, q, p):
+
+def registrar_operacion(t, tipo, q, p, emo, nota):
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
     total = q * p; fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO trades (fecha, ticker, tipo, cantidad, precio, total) VALUES (?, ?, ?, ?, ?, ?)", (fecha, t, tipo, q, p, total))
+    c.execute("INSERT INTO trades (fecha, ticker, tipo, cantidad, precio, total, emocion, nota) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (fecha, t, tipo, q, p, total, emo, nota))
     conn.commit(); conn.close()
-def auditar_posiciones_sql():
+
+def obtener_cartera():
     conn = sqlite3.connect(DB_NAME); df = pd.read_sql_query("SELECT * FROM trades", conn); conn.close()
     if df.empty: return pd.DataFrame()
     pos = {}
@@ -215,101 +84,432 @@ def auditar_posiciones_sql():
     for t in activos:
         d = pos[t]
         try:
-            if len(activos) == 1: px = float(curr.iloc[-1])
-            else: px = float(curr.iloc[-1][t])
+            px = float(curr.iloc[-1]) if len(activos) == 1 else float(curr.iloc[-1][t])
             val = d['Qty'] * px; pnl = val - d['Cost']
-            res.append({"Ticker": t, "Cantidad": d['Qty'], "Valor": val, "P&L": pnl})
+            pct = (pnl / d['Cost']) * 100 if d['Cost'] > 0 else 0
+            res.append({"Ticker": t, "Cantidad": d['Qty'], "Precio Prom": d['Cost']/d['Qty'], "Precio Actual": px, "Valor": val, "P&L $": pnl, "P&L %": pct})
         except: pass
     return pd.DataFrame(res)
+
 init_db()
 
-# --- INTERFAZ V77 ---
-c1, c2 = st.columns([3, 1])
-with c1: st.title("🦈 Quant Terminal V77: Insider")
-with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
-
-snap = obtener_datos_snapshot(sel_ticker)
-if snap:
-    delta = ((snap['Precio'] - snap['Previo'])/snap['Previo'])*100
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Precio", f"${snap['Precio']:.2f}", f"{delta:+.2f}%")
-    k2.metric("RSI", f"{snap['RSI']:.0f}")
-    k3.metric("Vol", f"{snap['Volumen']/1e6:.1f}M")
-    k4.metric("Beta", f"{snap['Beta']:.2f}")
-    k5.metric("Target", f"${snap['Target']:.2f}")
-
-st.divider()
-
-col_main, col_side = st.columns([2, 1])
-
-fund = obtener_fundamentales_premium(sel_ticker)
-mc = simulacion_monte_carlo(sel_ticker)
-insider = obtener_datos_insider(sel_ticker)
-
-with col_main:
-    # GRÁFICO PRO (V77)
-    st.subheader("📉 Acción del Precio & Patrones")
-    fig_chart = graficar_pro(sel_ticker)
-    if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
-    
-    tabs_detail = st.tabs(["🦈 Institucionales & Short", "🔮 Monte Carlo", "📚 Fundamentales", "📝 IA"])
-    
-    # --- TAB 1: INSIDERS (NUEVO V77) ---
-    with tabs_detail[0]:
-        st.subheader("🦈 Quién es dueño de la empresa?")
-        if insider:
-            c_i1, c_i2, c_i3 = st.columns(3)
-            c_i1.metric("Institucionales", f"{insider['Institucional']:.1f}%", help="% en manos de Bancos/Fondos (Smart Money)")
-            c_i2.metric("Insiders", f"{insider['Insiders']:.1f}%", help="% en manos de Directivos/Dueños")
-            c_i3.metric("Short Float", f"{insider['Short_Float']:.2f}%", help="% Apostado en contra (Alto > 5%)", delta_color="inverse")
-            
-            # Semáforo de propiedad
-            if insider['Institucional'] > 70: st.success("✅ Fuerte Respaldo Institucional (>70%)")
-            elif insider['Institucional'] < 40: st.warning("⚠️ Poco interés Institucional (Principalmente Retail)")
-            
-            if insider['Short_Float'] > 10: st.error("🚨 ALERTA: Alto nivel de ventas en corto (Posible Short Squeeze o Quiebra)")
-        else: st.info("Datos de propiedad no disponibles.")
-
-    with tabs_detail[1]:
-        if mc:
-            st.metric("Probabilidad Suba", f"{mc['Prob_Suba']:.1f}%")
-            fig_mc = go.Figure()
-            for i in range(20): fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=mc['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
-            fig_mc.add_trace(go.Scatter(x=mc['Dates'], y=np.mean(mc['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
-            fig_mc.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0)); st.plotly_chart(fig_mc, use_container_width=True)
-
-    with tabs_detail[2]:
-        if fund:
-            fig_m = go.Figure(); fig_m.add_trace(go.Scatter(x=fund['Fechas'], y=fund['Margen_Neto'], name='Margen Neto', line=dict(color='green')))
-            fig_m.update_layout(height=200, template="plotly_dark", title="Margen Neto (%)", margin=dict(l=0,r=0,t=30,b=0)); st.plotly_chart(fig_m, use_container_width=True)
-            c1, c2 = st.columns(2); c1.metric("Liquidez", f"{fund['Current']:.2f}"); c2.metric("Deuda", f"{fund['Debt']:.2f}")
-
-    with tabs_detail[3]:
-        if st.button("Generar Informe IA"):
-            try: st.write(model.generate_content(f"Analisis completo {sel_ticker}").text)
-            except: st.error("Error IA")
-
-with col_side:
-    st.subheader("💼 Gestión de Cartera")
-    df_p = auditar_posiciones_sql()
-    
-    if not df_p.empty:
-        # Gráfico de Torta de la Cartera (NUEVO V77)
-        fig_pie = px.pie(df_p, values='Valor', names='Ticker', hole=0.4)
-        fig_pie.update_layout(showlegend=False, margin=dict(l=0,r=0,t=0,b=0), height=200)
-        st.plotly_chart(fig_pie, use_container_width=True)
-        st.dataframe(df_p[['Ticker', 'P&L']], use_container_width=True)
+# --- MOTOR MACROECONÓMICO AVANZADO (V87) ---
+@st.cache_data(ttl=1800)
+def obtener_contexto_macro_avanzado():
+    """Analiza VIX, Bonos, SPY, QQQ e IWM para determinar el 'Risk On/Off'"""
+    try:
+        tickers = ["^VIX", "^TNX", "SPY", "QQQ", "IWM"]
+        data = yf.download(" ".join(tickers), period="5d", progress=False, auto_adjust=True)['Close']
         
-        # Riesgo Cartera
-        risk = calcular_riesgo_cartera(df_p)
-        if risk:
-            st.metric("Beta Cartera", f"{risk['Beta_Cartera']:.2f}")
-            st.metric("Riesgo Crash (-20%)", f"${risk['Crash']:,.0f}", delta_color="inverse")
-    else: st.info("Cartera vacía.")
+        vix = data['^VIX'].iloc[-1]
+        bond_10y = data['^TNX'].iloc[-1]
+        
+        # Ratio IWM/QQQ (Small Caps vs Tech) - Mide apetito de riesgo real
+        iwm_qqq_ratio = data['IWM'].iloc[-1] / data['QQQ'].iloc[-1]
+        iwm_qqq_prev = data['IWM'].iloc[-5] / data['QQQ'].iloc[-5]
+        rotacion = "Hacia Riesgo (Small Caps)" if iwm_qqq_ratio > iwm_qqq_prev else "Hacia Seguridad (Big Tech)"
+        
+        # Fear & Greed Proxy
+        fear_greed_score = 50 
+        if vix < 15: fear_greed_score += 20
+        elif vix > 25: fear_greed_score -= 30
+        
+        # Tendencia Mercado
+        spy_trend = "Alcista" if data['SPY'].iloc[-1] > data['SPY'].iloc[0] else "Bajista"
+        
+        if spy_trend == "Alcista": fear_greed_score += 10
+        else: fear_greed_score -= 10
+        
+        estado = "NEUTRAL"
+        if fear_greed_score > 65: estado = "EUFORIA (Greed) 🟢"
+        elif fear_greed_score < 35: estado = "PÁNICO (Fear) 🔴"
+        
+        return {
+            "VIX": vix,
+            "Bono_10Y": bond_10y,
+            "Rotacion": rotacion,
+            "Estado_Mercado": estado,
+            "Score_Macro": fear_greed_score
+        }
+    except: return None
 
-    st.markdown("---")
-    st.subheader("⚡ Quick Trade")
-    with st.form("quick"):
-        q = st.number_input("Qty", 1, 1000, 10); s = st.selectbox("Side", ["COMPRA", "VENTA"])
+# --- MOTOR FUNDAMENTAL Y NOTICIAS REPARADO (V87) ---
+@st.cache_data(ttl=3600)
+def analisis_fundamental_y_noticias(ticker):
+    """Combina Ratios Financieros con Análisis de Noticias NLP"""
+    if "USD" in ticker: return None
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # 1. Scoring Financiero (Base 60 puntos)
+        score_fin = 30 # Base
+        
+        # Rentabilidad
+        net_margin = info.get('profitMargins', 0)
+        if net_margin > 0.2: score_fin += 10
+        elif net_margin > 0.1: score_fin += 5
+        
+        roe = info.get('returnOnEquity', 0)
+        if roe > 0.15: score_fin += 10
+        
+        # Solvencia
+        current_ratio = info.get('currentRatio', 0)
+        if current_ratio > 1.5: score_fin += 5
+        
+        debt_eq = info.get('debtToEquity', 0)
+        if debt_eq < 100: score_fin += 5
+        
+        # 2. Análisis NLP de Noticias (Base 40 puntos)
+        score_news = 20 # Neutral base
+        noticias_relevantes = []
+        try:
+            news = stock.news[:5]
+            bull_words = ['beat', 'rise', 'up', 'growth', 'strong', 'buy', 'record', 'gain']
+            bear_words = ['miss', 'fall', 'down', 'weak', 'sell', 'loss', 'drop', 'risk']
+            
+            for n in news:
+                title = n['title']
+                txt_lower = title.lower()
+                impacto = 0
+                if any(w in txt_lower for w in bull_words): impacto += 1
+                if any(w in txt_lower for w in bear_words): impacto -= 1
+                
+                score_news += (impacto * 4) # Cada noticia mueve 4 puntos
+                
+                label = "Positivo" if impacto > 0 else "Negativo" if impacto < 0 else "Neutral"
+                noticias_relevantes.append(f"{label}: {title}")
+                
+        except: pass
+        
+        # Score Final
+        total_score = min(100, max(0, score_fin + score_news - 20)) # Ajuste
+        
+        # Diagnóstico
+        calidad = "EXCELENTE 💎" if total_score > 75 else "SÓLIDA ✅" if total_score > 50 else "DÉBIL ⚠️"
+        
+        return {
+            "Score_Total": total_score,
+            "Calidad": calidad,
+            "Ratios": {
+                "Margen_Neto": net_margin * 100,
+                "ROE": roe * 100,
+                "Deuda_Eq": debt_eq,
+                "Liquidez": current_ratio
+            },
+            "Noticias_Resumen": noticias_relevantes
+        }
+    except: return None
+
+# --- ESTRATEGIA OPERATIVA PROFESIONAL (IA V87) ---
+def generar_estrategia_profesional(ticker, snap, macro, fund, mc, ml, dcf):
+    """Prompt de Ingeniería Financiera para generar informes tipo Mesa de Dinero"""
+    
+    # Construcción del Contexto
+    ctx_macro = f"VIX: {macro['VIX']:.2f}, Bonos 10Y: {macro['Bono_10Y']:.2f}%, Mercado: {macro['Estado_Mercado']}, Rotación: {macro['Rotacion']}." if macro else "Sin datos macro."
+    
+    ctx_micro = "Sin datos fundamentales."
+    if fund:
+        ctx_micro = f"Score Calidad: {fund['Score_Total']}/100 ({fund['Calidad']}). Margen Neto: {fund['Ratios']['Margen_Neto']:.2f}%. Noticias recientes: {'; '.join(fund['Noticias_Resumen'][:2])}."
+    
+    ctx_tecnico = f"Precio: ${snap['Precio']:.2f}. RSI: {snap['RSI']:.0f}. Tendencia CP: {'Alcista' if snap['Precio']>snap['Previo'] else 'Bajista'}."
+    
+    ctx_quant = f"Monte Carlo (30d): Probabilidad Suba {mc['Prob_Suba']:.1f}%. Riesgo VaR: ${mc['VaR_95']:.2f}. ML Predice: {ml['Pred']} (Conf: {ml['Acc']:.0f}%)." if mc and ml else "Faltan modelos quant."
+    
+    val_dcf = f"${dcf:.2f}" if dcf else "N/A"
+
+    prompt = f"""
+    Actúa como un Jefe de Estrategia de un Fondo de Cobertura (Hedge Fund). Escribe un INFORME OPERATIVO EJECUTIVO para el activo {ticker}.
+    
+    DATOS DEL SISTEMA:
+    1. MACRO: {ctx_macro}
+    2. FUNDAMENTAL & NOTICIAS: {ctx_micro}
+    3. TÉCNICO: {ctx_tecnico}
+    4. QUANT & PROBABILIDAD: {ctx_quant}
+    5. VALOR JUSTO (DCF): {val_dcf}
+    
+    ESTRUCTURA DEL INFORME (Markdown):
+    
+    ## 🎯 ESTRATEGIA OPERATIVA: [COMPRAR / VENDER / ESPERAR / ACUMULAR]
+    
+    ### 1. 🏛️ El Diagnóstico (Estado de Situación)
+    Analiza la calidad de la empresa (Fundamentales/Noticias) y crúzala con el entorno Macro (VIX/Bonos). ¿Es un buen activo en un mal momento o viceversa? Menciona si hay divergencia entre Precio y Valor (DCF).
+    
+    ### 2. 📊 Niveles Clave (Hoja de Ruta)
+    * **Zona de Entrada (Buy Zone):** $[Rango] (Justifica con técnico/Soporte).
+    * **Stop Loss (Técnico):** $[Valor] (Protección ante volatilidad VIX).
+    * **Take Profit 1 (Táctico):** $[Valor].
+    * **Take Profit 2 (Estructural):** $[Valor].
+    
+    ### 3. 🧠 Tesis del Trade & Riesgo
+    Integra el resultado de Monte Carlo y el Oráculo ML. ¿Qué probabilidad tenemos a favor? ¿Cuál es el riesgo de caída (VaR)? Argumenta la decisión final como un profesional.
+    """
+    
+    try: return model.generate_content(prompt).text
+    except: return "⚠️ Error conectando con el Estratega IA."
+
+# --- MOTORES TÉCNICOS (V83/V86) ---
+def calcular_vsa_color(row):
+    if row['Volume'] > row['Vol_SMA'] * 1.5:
+        return 'rgba(0, 255, 0, 0.6)' if row['Close'] > row['Open'] else 'rgba(255, 0, 0, 0.6)'
+    elif row['Volume'] < row['Vol_SMA'] * 0.5: return 'rgba(100, 100, 100, 0.3)'
+    else: return 'rgba(100, 100, 100, 0.6)'
+
+def detectar_patrones_velas_pro(df):
+    df['Cuerpo'] = abs(df['Close'] - df['Open'])
+    df['Mecha_Sup'] = df['High'] - df[['Close', 'Open']].max(axis=1)
+    df['Mecha_Inf'] = df[['Close', 'Open']].min(axis=1) - df['Low']
+    df['Rango'] = df['High'] - df['Low']; df['Cuerpo_Prom'] = df['Cuerpo'].rolling(10).mean()
+    df['Patron_Marubozu_Bull'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Mecha_Inf'] < 0.05 * df['Rango']) & (df['Close'] > df['Open'])
+    df['Patron_Marubozu_Bear'] = (df['Cuerpo'] > 2 * df['Cuerpo_Prom']) & (df['Mecha_Sup'] < 0.05 * df['Rango']) & (df['Mecha_Inf'] < 0.05 * df['Rango']) & (df['Close'] < df['Open'])
+    df['Patron_Martillo'] = (df['Mecha_Inf'] > 2 * df['Cuerpo']) & (df['Mecha_Sup'] < 0.3 * df['Cuerpo'])
+    df['Patron_Doji'] = df['Cuerpo'] <= df['Rango'] * 0.1
+    df['Patron_BullEng'] = (df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & (df['Close'] > df['Open'].shift(1)) & (df['Open'] < df['Close'].shift(1))
+    return df
+
+def calcular_soportes_resistencias(df, window=20):
+    df['Resistencia'] = df['High'].rolling(window=window, center=True).max()
+    df['Soporte'] = df['Low'].rolling(window=window, center=True).min()
+    return df
+
+@st.cache_data(ttl=60)
+def obtener_datos_grafico(ticker, intervalo):
+    mapa = {"15m": "60d", "1h": "730d", "4h": "2y", "1d": "2y", "1wk": "5y", "1mo": "10y"}
+    try:
+        df = yf.Ticker(ticker).history(period=mapa.get(intervalo, "1y"), interval=intervalo)
+        return df if not df.empty else None
+    except: return None
+
+def graficar_profesional_quant(ticker, intervalo):
+    df = obtener_datos_grafico(ticker, intervalo)
+    if df is None: return None
+    macd = ta.macd(df['Close']); df = pd.concat([df, macd], axis=1)
+    df['RSI'] = ta.rsi(df['Close'], 14)
+    try: df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+    except: df['VWAP'] = ta.sma(df['Close'], 20)
+    df['Vol_SMA'] = ta.sma(df['Volume'], 20)
+    colors_vsa = df.apply(calcular_vsa_color, axis=1)
+    df = detectar_patrones_velas_pro(df); df = calcular_soportes_resistencias(df)
+    
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.15, 0.2], subplot_titles=(f"Precio ({intervalo}) + VWAP + Patrones", "VSA (Volumen)", "MACD", "RSI"))
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Precio'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#FFD700', width=1.5), name='VWAP'), row=1, col=1)
+    fig.add_hline(y=df['Resistencia'].iloc[-1], line_dash="dash", line_color="red", row=1, col=1)
+    fig.add_hline(y=df['Soporte'].iloc[-1], line_dash="dash", line_color="green", row=1, col=1)
+    maru_bull = df[df['Patron_Marubozu_Bull']]; maru_bear = df[df['Patron_Marubozu_Bear']]; hammer = df[df['Patron_Martillo']]
+    fig.add_trace(go.Scatter(x=maru_bull.index, y=maru_bull['Low'], mode='markers', marker=dict(symbol='square', size=8, color='blue'), name='Marubozu Alcista'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=maru_bear.index, y=maru_bear['High'], mode='markers', marker=dict(symbol='square', size=8, color='purple'), name='Marubozu Bajista'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=hammer.index, y=hammer['Low'], mode='markers', marker=dict(symbol='diamond', size=6, color='cyan'), name='Martillo'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors_vsa, name='Volumen VSA'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_12_26_9'], line=dict(color='white', width=1), name='MACD'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACDs_12_26_9'], line=dict(color='orange', width=1), name='Signal'), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['MACDh_12_26_9'], marker_color='gray', name='Hist'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1), name='RSI'), row=4, col=1)
+    fig.add_hline(y=70, line_color="red", line_dash="dot", row=4, col=1); fig.add_hline(y=30, line_color="green", line_dash="dot", row=4, col=1)
+    fig.update_layout(template="plotly_dark", height=800, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=30,b=0)); return fig
+
+# --- MOTORES SOPORTE ---
+@st.cache_data(ttl=900)
+def get_snapshot(ticker):
+    try:
+        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
+        if hist.empty: return None
+        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50}
+    except: return None
+
+def simulacion_monte_carlo(ticker, dias=30, simulaciones=100):
+    try:
+        data = yf.Ticker(ticker).history(period="1y")['Close']
+        if data.empty: return None
+        returns = data.pct_change().dropna(); mu = returns.mean(); sigma = returns.std(); start_price = data.iloc[-1]
+        sim_paths = np.zeros((dias, simulaciones)); sim_paths[0] = start_price
+        for t in range(1, dias):
+            drift = (mu - 0.5 * sigma**2); shock = sigma * np.random.normal(0, 1, simulaciones)
+            sim_paths[t] = sim_paths[t-1] * np.exp(drift + shock)
+        final = sim_paths[-1]
+        return {"Paths": sim_paths, "Dates": [data.index[-1]+timedelta(days=i) for i in range(dias)], "Mean_Price": np.mean(final), "Prob_Suba": np.mean(final>start_price)*100, "VaR_95": np.percentile(final, 5)}
+    except: return None
+
+def oraculo_ml(ticker):
+    try:
+        df = yf.Ticker(ticker).history(period="2y")
+        if len(df)<200: return None
+        df['RSI'] = ta.rsi(df['Close'], 14); df['SMA_Diff'] = (df['Close'] - ta.sma(df['Close'], 50))/ta.sma(df['Close'], 50)
+        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+        df = df.dropna()
+        X = df[['RSI', 'SMA_Diff']]; y = df['Target']
+        split = int(len(df)*0.8); clf = RandomForestClassifier(n_estimators=100, random_state=42).fit(X.iloc[:split], y.iloc[:split])
+        acc = accuracy_score(y.iloc[split:], clf.predict(X.iloc[split:]))
+        pred = clf.predict(X.iloc[[-1]])[0]; prob = clf.predict_proba(X.iloc[[-1]])[0][pred]
+        return {"Pred": "SUBE 🟢" if pred==1 else "BAJA 🔴", "Acc": acc*100, "Prob": prob*100}
+    except: return None
+
+@st.cache_data(ttl=3600)
+def obtener_datos_insider(ticker):
+    if "USD" in ticker: return None
+    try:
+        info = yf.Ticker(ticker).info
+        return {"Institucional": info.get('heldPercentInstitutions', 0)*100, "Short_Float": (info.get('sharesShort', 0)/info.get('floatShares', 1))*100}
+    except: return None
+
+def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max, posicion='Compra'):
+    precios = np.linspace(precio_spot_min, precio_spot_max, 100); payoffs = []
+    for S in precios:
+        val_intr = max(S - strike, 0) if tipo == 'Call' else max(strike - S, 0)
+        pnl = val_intr - prima if posicion == 'Compra' else prima - val_intr
+        payoffs.append(pnl)
+    return precios, payoffs
+
+def scanner_mercado(tickers):
+    ranking = []
+    try: data = yf.download(" ".join(tickers), period="6mo", group_by='ticker', progress=False, auto_adjust=True)
+    except: return pd.DataFrame()
+    for t in tickers:
+        try:
+            df = data[t].dropna() if len(tickers)>1 else data.dropna()
+            if df.empty: continue
+            curr = df['Close'].iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]; sma200 = df['Close'].rolling(200).mean().iloc[-1]
+            trend = "Alcista" if curr > sma200 else "Bajista"
+            score = 50 + (20 if trend == "Alcista" else 0) + (20 if rsi < 30 else -10 if rsi > 70 else 0)
+            ranking.append({"Ticker": t, "Precio": curr, "RSI": rsi, "Tendencia": trend, "Score": score})
+        except: pass
+    return pd.DataFrame(ranking).sort_values("Score", ascending=False)
+
+# --- 4. INTERFAZ GRÁFICA ---
+
+# SIDEBAR
+with st.sidebar:
+    st.title("🏛️ Prof. Quant V87")
+    lista_actual = st.selectbox("Lista:", list(st.session_state['mis_listas'].keys()), index=0)
+    activos_lista = st.session_state['mis_listas'][lista_actual]
+    sel_ticker = st.selectbox("Activo", activos_lista if activos_lista else ["Sin Activos"])
+    
+    with st.expander("⚙️ Listas"):
+        nl = st.text_input("Nueva"); nt = st.text_input("Ticker")
+        if st.button("Crear") and nl: st.session_state['mis_listas'][nl] = []; st.rerun()
+        if st.button("Agregar") and nt: st.session_state['mis_listas'][lista_actual].append(nt.upper()); st.rerun()
+
+    st.markdown("### 🧠 Operativa")
+    with st.form("trade"):
+        q = st.number_input("Qty", 1); s = st.selectbox("Lado", ["COMPRA", "VENTA"])
+        emo = st.select_slider("Emoción", ["Miedo", "Neutro", "Euforia"]); nota = st.text_area("Nota")
         if st.form_submit_button("EJECUTAR"): 
-            if snap: registrar_operacion_sql(sel_ticker, s, q, snap['Precio']); st.success("Orden OK"); st.rerun()
+            snap = get_snapshot(sel_ticker)
+            if snap: registrar_operacion(sel_ticker, s, q, snap['Precio'], emo, nota); st.success("OK"); time.sleep(1); st.rerun()
+
+# MAIN
+st.title(f"Análisis: {sel_ticker}")
+
+tabs = st.tabs(["📊 DASHBOARD", "🔬 ANÁLISIS 360 (MASTER)", "♟️ OPCIONES", "🧠 PSICOLOGÍA"])
+
+# --- TAB 1: DASHBOARD ---
+with tabs[0]:
+    st.subheader("🌍 Resumen Ejecutivo Macro")
+    macro = obtener_contexto_macro_avanzado()
+    if macro:
+        c1, c2, c3, c4 = st.columns(4)
+        vix_color = "risk-alert" if macro['VIX'] > 20 else "risk-safe"
+        c1.markdown(f"<div class='{vix_color}'>VIX (Miedo)<br><b>{macro['VIX']:.2f}</b></div>", unsafe_allow_html=True)
+        c2.metric("Sentimiento Global", macro['Estado_Mercado'])
+        c3.metric("Bonos 10Y", f"{macro['Bono_10Y']:.2f}%")
+        c4.metric("Flujo Dinero", macro['Rotacion'])
+    
+    st.markdown("---")
+    df_pos = obtener_cartera(); ranking = scanner_mercado(DEFAULT_WATCHLIST)
+    kc1, kc2 = st.columns([1, 2])
+    with kc1: 
+        if not df_pos.empty: st.plotly_chart(px.pie(df_pos, values='Valor', names='Ticker', hole=0.5, title="Cartera"), use_container_width=True)
+        else: st.info("Cartera vacía.")
+    with kc2: st.dataframe(ranking.head(5), use_container_width=True)
+
+# --- TAB 2: ANÁLISIS 360 (MASTER STRATEGIST V87) ---
+with tabs[1]:
+    # 1. VISUALIZACIÓN TÉCNICA
+    st.subheader("📉 Visión Técnica Profesional")
+    timeframe = st.selectbox("Timeframe", ["1d", "15m", "1h", "4h", "1wk"], index=0)
+    if sel_ticker != "Sin Activos":
+        fig = graficar_profesional_quant(sel_ticker, timeframe)
+        if fig: st.plotly_chart(fig, use_container_width=True, height=700)
+
+    # 2. ESTRATEGIA OPERATIVA (RENOVADA V87)
+    st.markdown("---")
+    st.subheader("🎯 Estrategia Operativa Maestra (Mesa de Dinero)")
+    
+    # Pre-cálculos para la estrategia
+    snap = get_snapshot(sel_ticker)
+    ml_res = oraculo_ml(sel_ticker)
+    mc_res = simulacion_monte_carlo(sel_ticker)
+    fund_res = analisis_fundamental_y_noticias(sel_ticker) # Nuevo Motor Fundamental V87
+    dcf_val = calcular_dcf_rapido(sel_ticker)
+    
+    # Botón Maestro
+    if st.button("⚡ GENERAR INFORME OPERATIVO COMPLETO"):
+        if snap and macro:
+            with st.spinner("La IA está integrando Macro, Balances, Noticias y Modelos Quant..."):
+                estrategia = generar_estrategia_profesional(sel_ticker, snap, macro, fund_res, mc_res, ml_res, dcf_val)
+                st.markdown(f"<div class='strat-box'>{estrategia}</div>", unsafe_allow_html=True)
+        else: st.error("Datos insuficientes para generar estrategia.")
+
+    # 3. RECURSOS DETALLADOS
+    st.markdown("---")
+    subtabs = st.tabs(["📊 Fundamentales & Noticias", "🤖 Oráculo ML", "🔮 Monte Carlo", "🦈 Insider"])
+    
+    with subtabs[0]: # Fundamental + Noticias V87
+        if fund_res:
+            c1, c2, c3 = st.columns(3)
+            color_q = "green" if fund_res['Score_Total'] > 60 else "red"
+            c1.markdown(f"#### Score Calidad: :{color_q}[{fund_res['Score_Total']}/100]")
+            c1.caption(f"Diagnóstico: {fund_res['Calidad']}")
+            c2.metric("Margen Neto", f"{fund_res['Ratios']['Margen_Neto']:.2f}%")
+            c3.metric("Deuda/Patrimonio", f"{fund_res['Ratios']['Deuda_Eq']:.2f}")
+            
+            st.markdown("#### 🗞️ Análisis de Noticias (Impacto)")
+            for noticia in fund_res['Noticias_Resumen']:
+                st.write(f"• {noticia}")
+        else: st.warning("Datos fundamentales limitados para este activo.")
+        
+    with subtabs[1]: # ML
+        if ml_res:
+            c1, c2 = st.columns(2)
+            c1.metric("Predicción IA", ml_res['Pred'])
+            c2.metric("Confianza", f"{ml_res['Acc']:.1f}%")
+            
+    with subtabs[2]: # Monte Carlo
+        if mc_res:
+            st.metric("Probabilidad Suba (30d)", f"{mc_res['Prob_Suba']:.1f}%")
+            fig_mc = go.Figure()
+            for i in range(20): fig_mc.add_trace(go.Scatter(x=mc_res['Dates'], y=mc_res['Paths'][:, i], mode='lines', line=dict(color='gray', width=1), opacity=0.3, showlegend=False))
+            fig_mc.add_trace(go.Scatter(x=mc_res['Dates'], y=np.mean(mc_res['Paths'], axis=1), mode='lines', name='Promedio', line=dict(color='yellow', width=3)))
+            st.plotly_chart(fig_mc, use_container_width=True)
+            
+    with subtabs[3]: # Insider
+        insider = obtener_datos_insider(sel_ticker)
+        if insider:
+            c1, c2 = st.columns(2); c1.metric("Institucional", f"{insider['Institucional']:.1f}%"); c2.metric("Shorts", f"{insider['Short_Float']:.2f}%")
+
+# --- TAB 3: OPCIONES ---
+with tabs[2]:
+    st.subheader("♟️ Laboratorio Derivados")
+    col_op1, col_op2 = st.columns([1, 3])
+    snap = get_snapshot(sel_ticker); precio_ref = snap['Precio'] if snap else 100
+    with col_op1:
+        tipo_est = st.selectbox("Estrategia", ["Simple (Call/Put)", "Bull Call Spread"])
+        if tipo_est == "Simple (Call/Put)":
+            op_tipo = st.selectbox("Tipo", ["Call", "Put"]); op_pos = st.selectbox("Posición", ["Compra", "Venta"])
+            strike = st.number_input("Strike", value=float(int(precio_ref))); prima = st.number_input("Prima", value=5.0)
+            precios, payoffs = calcular_payoff_opcion(op_tipo, strike, prima, precio_ref*0.7, precio_ref*1.3, op_pos)
+    with col_op2:
+        fig_pay = go.Figure()
+        fig_pay.add_trace(go.Scatter(x=precios, y=payoffs, mode='lines', name='P&L', fill='tozeroy', line=dict(color='cyan')))
+        fig_pay.add_vline(x=precio_ref, line_color="yellow"); st.plotly_chart(fig_pay, use_container_width=True)
+
+# --- TAB 4: PSICOLOGÍA ---
+with tabs[3]:
+    st.subheader("🧠 Diario Emocional")
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        df_diario = pd.read_sql_query("SELECT * FROM trades ORDER BY fecha DESC", conn)
+        if not df_diario.empty: st.dataframe(df_diario)
+        else: st.info("Sin registros.")
+    except: pass
+    conn.close()
