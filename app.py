@@ -24,14 +24,14 @@ import base64
 
 # --- 1. CONFIGURACIÓN DEL SISTEMA ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V87", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Sistema de Inversiones Profesional Quant V88", layout="wide", page_icon="🏛️")
 
 st.markdown("""<style>
     .main {background-color: #0e1117;}
     .metric-card {background-color: #1c1c2e; border: 1px solid #2d2d3f; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);}
     .metric-value {font-size: 24px; font-weight: bold; color: #ffffff;}
     .metric-label {font-size: 14px; color: #a0a0a0;}
-    .strat-box {background-color: #0f172a; border: 1px solid #3b82f6; border-left: 5px solid #3b82f6; padding: 25px; border-radius: 8px; margin-top: 15px; font-family: 'Segoe UI', sans-serif; line-height: 1.6;}
+    .strat-box {background-color: #0f172a; border: 1px solid #3b82f6; border-left: 5px solid #3b82f6; padding: 25px; border-radius: 8px; margin-top: 15px; font-family: 'Segoe UI', sans-serif; line-height: 1.6; white-space: pre-wrap;}
     .macro-card {background-color: #2a1a1a; border: 1px solid #ff4b4b; padding: 10px; border-radius: 5px; text-align: center;}
     .macro-safe {background-color: #1a2a1a; border: 1px solid #00cc96; padding: 10px; border-radius: 5px; text-align: center;}
     .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
@@ -40,7 +40,8 @@ st.markdown("""<style>
 try:
     secrets = toml.load(".streamlit/secrets.toml") if os.path.exists(".streamlit/secrets.toml") else st.secrets
     genai.configure(api_key=secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    # CAMBIO V88: Usamos el modelo PRO para razonamiento complejo
+    model = genai.GenerativeModel('gemini-1.5-pro') 
 except: pass
 
 DB_NAME = "quant_database.db"
@@ -154,43 +155,102 @@ def analisis_fundamental_y_noticias(ticker):
         return {"Score_Total": total_score, "Calidad": calidad, "Ratios": {"Margen_Neto": margins * 100, "ROE": roe * 100, "Deuda_Eq": debt_eq, "Liquidez": current_ratio}, "Noticias_Resumen": noticias_relevantes}
     except: return None
 
-# --- ESTRATEGIA OPERATIVA PROFESIONAL (IA) ---
+# --- ESTRATEGIA OPERATIVA PROFESIONAL (IA V88 - DEEP ANALYSIS) ---
 def generar_estrategia_profesional(ticker, snap, macro, fund, mc, ml, dcf):
+    """Prompt Maestro para Informes Extensos tipo 'Hedge Fund'"""
+    
     ctx_macro = f"VIX: {macro['VIX']:.2f}, Bonos 10Y: {macro['Bono_10Y']:.2f}%, Mercado: {macro['Estado_Mercado']}, Rotación: {macro['Rotacion']}." if macro else "Sin datos macro."
     ctx_micro = "Sin datos fundamentales."
-    if fund: ctx_micro = f"Score Calidad: {fund['Score_Total']}/100 ({fund['Calidad']}). Margen Neto: {fund['Ratios']['Margen_Neto']:.2f}%. Noticias recientes: {'; '.join(fund['Noticias_Resumen'][:2])}."
+    if fund: ctx_micro = f"Score Calidad: {fund['Score_Total']}/100 ({fund['Calidad']}). Margen Neto: {fund['Ratios']['Margen_Neto']:.2f}%. Noticias recientes: {'; '.join(fund['Noticias_Resumen'][:3])}."
     ctx_tecnico = f"Precio: ${snap['Precio']:.2f}. RSI: {snap['RSI']:.0f}. Tendencia CP: {'Alcista' if snap['Precio']>snap['Previo'] else 'Bajista'}."
     ctx_quant = f"Monte Carlo (30d): Probabilidad Suba {mc['Prob_Suba']:.1f}%. Riesgo VaR: ${mc['VaR_95']:.2f}. ML Predice: {ml['Pred']} (Conf: {ml['Acc']:.0f}%)." if mc and ml else "Faltan modelos quant."
     val_dcf = f"${dcf:.2f}" if dcf else "N/A"
 
+    # Prompt V88: Estructurado para generar 1000+ palabras de valor
     prompt = f"""
-    Actúa como un Jefe de Estrategia de un Fondo de Cobertura (Hedge Fund). Escribe un INFORME OPERATIVO EJECUTIVO para el activo {ticker}.
+    Actúa como el Director de Inversiones (CIO) de un Fondo Cuantitativo Global. Escribe un INFORME ESTRATÉGICO PROFESIONAL EXTENSO para el activo **{ticker}**.
     
-    DATOS DEL SISTEMA:
-    1. MACRO: {ctx_macro}
-    2. FUNDAMENTAL & NOTICIAS: {ctx_micro}
+    **DATOS EN TIEMPO REAL:**
+    1. MACROECONOMÍA: {ctx_macro}
+    2. FUNDAMENTALES: {ctx_micro}
     3. TÉCNICO: {ctx_tecnico}
-    4. QUANT & PROBABILIDAD: {ctx_quant}
-    5. VALOR JUSTO (DCF): {val_dcf}
+    4. QUANT & RIESGO: {ctx_quant}
+    5. VALUACIÓN (DCF): {val_dcf}
     
-    ESTRUCTURA DEL INFORME (Markdown):
+    ---
+    **INSTRUCCIONES DE FORMATO Y CONTENIDO:**
+    El informe debe ser detallado, analítico y ejecutable. Usa un tono serio y profesional.
     
-    ## 🎯 ESTRATEGIA OPERATIVA: [COMPRAR / VENDER / ESPERAR / ACUMULAR]
+    **SECCIÓN 1: RESUMEN EJECUTIVO Y DIAGNÓSTICO**
+    * **Veredicto:** [COMPRA FUERTE / ACUMULACIÓN / MANTENER / VENTA]
+    * **Tesis Central:** Resume en un párrafo potente por qué el activo está en esta situación, cruzando el entorno Macro (VIX) con sus Fundamentales.
     
-    ### 1. 🏛️ El Diagnóstico (Estado de Situación)
-    Analiza la calidad de la empresa (Fundamentales/Noticias) y crúzala con el entorno Macro (VIX/Bonos). ¿Es un buen activo en un mal momento o viceversa? Menciona si hay divergencia entre Precio y Valor (DCF).
+    **SECCIÓN 2: ANÁLISIS FUNDAMENTAL PROFUNDO**
+    * **Salud Financiera:** Analiza los márgenes y la deuda proporcionados. ¿Es una empresa solvente?
+    * **Valuación:** Compara el Precio Actual vs. el Valor DCF. ¿Está infravalorada o sobrevalorada? ¿Qué dice el mercado?
+    * **Contexto Corporativo:** Interpreta el impacto de las noticias recientes mencionadas.
     
-    ### 2. 📊 Niveles Clave (Hoja de Ruta)
-    * **Zona de Entrada (Buy Zone):** $[Rango] (Justifica con técnico/Soporte).
-    * **Stop Loss (Técnico):** $[Valor] (Protección ante volatilidad VIX).
-    * **Take Profit 1 (Táctico):** $[Valor].
-    * **Take Profit 2 (Estructural):** $[Valor].
+    **SECCIÓN 3: ANÁLISIS TÉCNICO Y QUANT**
+    * **Lectura del Precio:** Interpreta el RSI y la Tendencia. ¿Estamos en zona de compra o venta institucional?
+    * **Modelos Matemáticos:** Explica qué significa la predicción del Oráculo ML y la probabilidad de Monte Carlo para este escenario. ¿Apoyan la tesis alcista/bajista?
     
-    ### 3. 🧠 Tesis del Trade & Riesgo
-    Integra el resultado de Monte Carlo y el Oráculo ML. ¿Qué probabilidad tenemos a favor? ¿Cuál es el riesgo de caída (VaR)? Argumenta la decisión final como un profesional.
+    **SECCIÓN 4: PLAN OPERATIVO (MESA DE DINERO)**
+    Proporciona niveles de precios exactos para configurar las órdenes:
+    * **Zona de Entrada (Buy Zone):** $[Rango] (Justifica técnicamente).
+    * **Stop Loss (Protección):** $[Valor] (Calculado para evitar barridos de volatilidad).
+    * **Take Profit 1 (Corto Plazo):** $[Valor].
+    * **Take Profit 2 (Objetivo Estructural):** $[Valor].
+    
+    **SECCIÓN 5: CONCLUSIÓN Y RIESGOS**
+    * Enumera 3 riesgos principales (Macro, Sectorial, Específico).
+    * Cierra con una recomendación final de gestión de cartera (tamaño de posición sugerido: pequeño/medio/grande).
     """
+    
     try: return model.generate_content(prompt).text
-    except: return "⚠️ Error conectando con el Estratega IA."
+    except Exception as e: return f"⚠️ Error IA: {str(e)}"
+
+# --- PDF ENGINE V88 (SOPORTE TEXTO LARGO) ---
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 14)
+        self.cell(0, 10, 'INFORME ESTRATEGICO QUANT - MESA DE DINERO', 0, 1, 'C')
+        self.ln(5)
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
+
+def clean_text(text):
+    # Reemplazo de caracteres no soportados por Latin-1
+    replacements = {
+        "🟢": "(+)", "🔴": "(-)", "⚠️": "(!)", "💎": "(Val)", "🚀": "(Up)",
+        "📊": "", "🏛️": "", "🧠": "", "🎯": "", "–": "-"
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    # Codificación segura
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+def generar_pdf_profesional(ticker, contenido_ia):
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Título del Activo
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell(0, 10, f'ACTIVO: {ticker}', 0, 1, 'L')
+    pdf.set_font('Arial', '', 10)
+    pdf.cell(0, 10, f'Fecha de Emision: {datetime.now().strftime("%Y-%m-%d %H:%M")}', 0, 1, 'L')
+    pdf.line(10, 35, 200, 35)
+    pdf.ln(10)
+    
+    # Contenido del Informe
+    pdf.set_font('Arial', '', 11)
+    # Usamos multi_cell para texto extenso
+    texto_limpio = clean_text(contenido_ia)
+    pdf.multi_cell(0, 6, texto_limpio)
+    
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- MOTORES TÉCNICOS ---
 def calcular_vsa_color(row):
@@ -302,7 +362,7 @@ def calcular_payoff_opcion(tipo, strike, prima, precio_spot_min, precio_spot_max
         payoffs.append(pnl)
     return precios, payoffs
 
-def calcular_dcf_rapido(ticker): # <--- FUNCIÓN REINTEGRADA
+def calcular_dcf_rapido(ticker):
     if "USD" in ticker: return None
     try:
         i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
@@ -332,7 +392,7 @@ def scanner_mercado(tickers):
 
 # SIDEBAR
 with st.sidebar:
-    st.title("🏛️ Prof. Quant V87")
+    st.title("🏛️ Prof. Quant V88")
     lista_actual = st.selectbox("Lista:", list(st.session_state['mis_listas'].keys()), index=0)
     activos_lista = st.session_state['mis_listas'][lista_actual]
     sel_ticker = st.selectbox("Activo", activos_lista if activos_lista else ["Sin Activos"])
@@ -375,7 +435,7 @@ with tabs[0]:
         else: st.info("Cartera vacía.")
     with kc2: st.dataframe(ranking.head(5), use_container_width=True)
 
-# --- TAB 2: ANÁLISIS 360 (MASTER STRATEGIST V87) ---
+# --- TAB 2: ANÁLISIS 360 (MASTER STRATEGIST V88) ---
 with tabs[1]:
     # 1. VISUALIZACIÓN TÉCNICA
     st.subheader("📉 Visión Técnica Profesional")
@@ -384,7 +444,7 @@ with tabs[1]:
         fig = graficar_profesional_quant(sel_ticker, timeframe)
         if fig: st.plotly_chart(fig, use_container_width=True, height=700)
 
-    # 2. ESTRATEGIA OPERATIVA (RENOVADA V87)
+    # 2. ESTRATEGIA OPERATIVA (RENOVADA V88)
     st.markdown("---")
     st.subheader("🎯 Estrategia Operativa Maestra (Mesa de Dinero)")
     
@@ -392,22 +452,34 @@ with tabs[1]:
     snap = get_snapshot(sel_ticker)
     ml_res = oraculo_ml(sel_ticker)
     mc_res = simulacion_monte_carlo(sel_ticker)
-    fund_res = analisis_fundamental_y_noticias(sel_ticker) # Nuevo Motor Fundamental V87
+    fund_res = analisis_fundamental_y_noticias(sel_ticker) 
     dcf_val = calcular_dcf_rapido(sel_ticker)
     
+    # Session State para guardar informe
+    if 'informe_maestro' not in st.session_state: st.session_state['informe_maestro'] = None
+    
     # Botón Maestro
-    if st.button("⚡ GENERAR INFORME OPERATIVO COMPLETO"):
+    if st.button("⚡ GENERAR INFORME ESTRATÉGICO COMPLETO (GEMINI PRO)"):
         if snap and macro:
-            with st.spinner("La IA está integrando Macro, Balances, Noticias y Modelos Quant..."):
+            with st.spinner("El Consultor PRO está redactando la tesis de inversión... (Puede demorar unos segundos)"):
                 estrategia = generar_estrategia_profesional(sel_ticker, snap, macro, fund_res, mc_res, ml_res, dcf_val)
-                st.markdown(f"<div class='strat-box'>{estrategia}</div>", unsafe_allow_html=True)
+                st.session_state['informe_maestro'] = estrategia
         else: st.error("Datos insuficientes para generar estrategia.")
+        
+    if st.session_state['informe_maestro']:
+        st.markdown(f"<div class='strat-box'>{st.session_state['informe_maestro']}</div>", unsafe_allow_html=True)
+        
+        # Botón PDF
+        if st.button("📄 DESCARGAR INFORME EN PDF"):
+            b64 = base64.b64encode(generar_pdf_profesional(sel_ticker, st.session_state['informe_maestro'])).decode()
+            href = f'<a href="data:application/octet-stream;base64,{b64}" download="Informe_Estrategico_{sel_ticker}.pdf" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: block; text-align: center; margin-top: 10px;">📥 DESCARGAR PDF</a>'
+            st.markdown(href, unsafe_allow_html=True)
 
     # 3. RECURSOS DETALLADOS
     st.markdown("---")
     subtabs = st.tabs(["📊 Fundamentales & Noticias", "🤖 Oráculo ML", "🔮 Monte Carlo", "🦈 Insider"])
     
-    with subtabs[0]: # Fundamental + Noticias V87
+    with subtabs[0]: # Fundamental + Noticias
         if fund_res:
             c1, c2, c3 = st.columns(3)
             color_q = "green" if fund_res['Score_Total'] > 60 else "red"
