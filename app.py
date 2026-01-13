@@ -11,21 +11,19 @@ import os
 import toml
 import sqlite3
 import math
-import feedparser 
-import time  # <--- NUEVO: Para pausar entre peticiones
+import time
 import requests 
 from datetime import datetime, timedelta
-from scipy.stats import norm 
 from sklearn.linear_model import LinearRegression
 import google.generativeai as genai
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V69 (Iron Shield)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Sistema Quant V70 (The CFO)", layout="wide", page_icon="📚")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .thesis-card {background-color: #1e1e2e; border-left: 4px solid #00BFFF; padding: 15px; border-radius: 5px;}
+    .fin-table {font-size: 12px;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -39,29 +37,63 @@ except: pass
 WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META', 'AMD', 'MELI', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'KO', 'DIS', 'SPY', 'QQQ', 'GLD', 'USO']
 DB_NAME = "quant_database.db"
 
-# --- MOTOR DE DATOS BLINDADO (NUEVO V69) ---
-@st.cache_data(ttl=1800) # Cache de 30 minutos para evitar bloqueos
-def obtener_datos_snapshot(ticker):
-    """Descarga segura de datos básicos para el encabezado"""
+# --- MOTOR DE DATOS FINANCIEROS DETALLADOS (NUEVO V70) ---
+@st.cache_data(ttl=3600)
+def obtener_datos_financieros_profundos(ticker):
+    """Extrae Balances y Estados de Resultados Anuales"""
+    if "USD" in ticker: return None # No aplica a Crypto
     try:
         stock = yf.Ticker(ticker)
-        # Pedimos solo lo necesario
-        hist = stock.history(period="5d")
-        if hist.empty: return None
         
-        # Info básica (propenso a fallar, lo envolvemos)
-        try: info = stock.info
-        except: info = {}
+        # 1. Estados Financieros Anuales
+        income = stock.income_stmt
+        balance = stock.balance_sheet
+        cashflow = stock.cashflow
+        
+        if income.empty or balance.empty: return None
+        
+        # Transponer para que las fechas sean filas (mejor para graficar)
+        income = income.T.sort_index()
+        balance = balance.T.sort_index()
+        
+        # Extraer métricas clave (Manejo de errores si faltan columnas)
+        fechas = income.index.strftime('%Y')
+        
+        # Safe get para columnas que a veces tienen nombres distintos
+        ingresos = income['Total Revenue'] if 'Total Revenue' in income else income.iloc[:, 0]
+        net_income = income['Net Income'] if 'Net Income' in income else pd.Series(0, index=income.index)
+        
+        # Datos para DuPont
+        equity = balance['Stockholders Equity'] if 'Stockholders Equity' in balance else pd.Series(1, index=balance.index)
+        assets = balance['Total Assets'] if 'Total Assets' in balance else pd.Series(1, index=balance.index)
+        
+        # Cálculo DuPont (Último Año)
+        last_net_income = net_income.iloc[-1]
+        last_revenue = ingresos.iloc[-1]
+        last_assets = assets.iloc[-1]
+        last_equity = equity.iloc[-1]
+        
+        margen_neto = (last_net_income / last_revenue)
+        rotacion_activos = (last_revenue / last_assets)
+        apalancamiento = (last_assets / last_equity)
+        roe = margen_neto * rotacion_activos * apalancamiento
         
         return {
-            "Precio": hist['Close'].iloc[-1],
-            "Previo": hist['Close'].iloc[-2],
-            "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist) > 14 else 50,
-            "Volumen": info.get('volume', 0),
-            "Beta": info.get('beta', 1.0),
-            "Target": info.get('targetMeanPrice', 0)
+            "Fechas": fechas,
+            "Ingresos": ingresos,
+            "Net_Income": net_income,
+            "Assets": assets,
+            "Equity": equity,
+            "DuPont": {
+                "Margen Neto": margen_neto * 100,
+                "Rotación Activos": rotacion_activos,
+                "Apalancamiento": apalancamiento,
+                "ROE": roe * 100
+            },
+            "Holders": stock.major_holders,
+            "Raw_Income": income.iloc[-3:].T, # Últimos 3 años raw
         }
-    except Exception: return None
+    except Exception as e: return None
 
 # --- MOTOR SQL ---
 def init_db():
@@ -90,11 +122,8 @@ def auditar_posiciones_sql():
     res = []
     activos = [t for t, d in pos.items() if d['Qty'] > 0]
     if not activos: return pd.DataFrame()
-    
-    # Descarga segura en bloque
     try: curr = yf.download(" ".join(activos), period="1d", progress=False, auto_adjust=True)['Close']
-    except: return pd.DataFrame() # Si falla, devuelve vacío, no crash
-    
+    except: return pd.DataFrame()
     for t in activos:
         d = pos[t]
         try:
@@ -107,56 +136,37 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE TESIS DE INVERSIÓN ---
-def generar_tesis_automatica(ticker, datos_tecnicos, datos_fundamentales, prediccion, estacionalidad):
-    puntos_bull = []; puntos_bear = []
-    
-    # Técnico
-    if datos_tecnicos['RSI'] < 30: puntos_bull.append("Sobreventa Técnica")
-    elif datos_tecnicos['RSI'] > 70: puntos_bear.append("Sobrecompra Técnica")
-    if datos_tecnicos['Precio'] > datos_tecnicos['SMA200']: puntos_bull.append("Tendencia Alcista")
-    else: puntos_bear.append("Tendencia Bajista")
-    
-    # Fundamental
-    if datos_fundamentales and datos_fundamentales.get('Upside', 0) > 10: puntos_bull.append("Subvaluada (DCF)")
-    
-    # Predicción
-    if prediccion and prediccion['Cambio_Pct'] > 5: puntos_bull.append("Proyección Positiva")
-    
-    score = len(puntos_bull) - len(puntos_bear)
-    veredicto = "COMPRA 🟢" if score > 0 else "VENTA 🔴" if score < 0 else "NEUTRAL 🟡"
-    return {"Veredicto": veredicto, "Pros": puntos_bull, "Contras": puntos_bear}
-
 # --- MOTORES RESTAURADOS ---
-@st.cache_data(ttl=1800) # Cache aumentado a 30 min
+@st.cache_data(ttl=1800)
+def obtener_datos_snapshot(ticker):
+    try:
+        stock = yf.Ticker(ticker); hist = stock.history(period="5d")
+        if hist.empty: return None
+        try: info = stock.info
+        except: info = {}
+        return {"Precio": hist['Close'].iloc[-1], "Previo": hist['Close'].iloc[-2], "RSI": ta.rsi(hist['Close'], 14).iloc[-1] if len(hist)>14 else 50, "Volumen": info.get('volume', 0), "Beta": info.get('beta', 1.0), "Target": info.get('targetMeanPrice', 0)}
+    except: return None
+
+@st.cache_data(ttl=1800)
 def escanear_mercado_completo(tickers):
     ranking = []
-    # Descarga masiva para evitar rate limit en precios
     try: data_hist = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
     except: return pd.DataFrame()
-    
     for t in tickers:
         try:
-            # Pausa táctica para no saturar al pedir 'info'
-            time.sleep(0.1) 
-            
+            time.sleep(0.05) 
             df = data_hist[t].dropna() if len(tickers)>1 else data_hist.dropna()
             if df.empty: continue
-            
-            # Info básica segura
             try: info = yf.Ticker(t).info
             except: info = {}
-            
             pe = info.get('trailingPE', 50); val = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
             curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
             mom = 0
             if curr > s200: mom += 50
             if rsi > 50: mom += (rsi - 50) * 2
             mom = max(0, min(100, mom))
-            
             score = (val * 0.4) + (mom * 0.6)
             if "USD" in t: score = mom
-            
             ranking.append({"Ticker": t, "Score": round(score, 1), "Precio": curr, "Value": round(val,0), "Momentum": round(mom,0)})
         except: pass
     return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
@@ -178,31 +188,27 @@ def generar_proyeccion_futura(ticker, dias=30):
         return {"Fechas": dates, "Predicción": pred, "Upper": upper, "Lower": lower, "Cambio_Pct": ((pred[-1]-y.iloc[-1])/y.iloc[-1])*100}
     except: return None
 
-@st.cache_data(ttl=3600)
-def analizar_estacionalidad(ticker):
+def calcular_factores_quant_single(ticker):
     try:
-        df = yf.Ticker(ticker).history(period="10y", auto_adjust=True)
+        stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True); info = stock.info
         if df.empty: return None
-        df['Retorno'] = df['Close'].pct_change()
-        df['Mes_Num'] = df.index.month
-        pivot = df.groupby([df.index.year, 'Mes_Num'])['Retorno'].apply(lambda x: (1+x).prod()-1).unstack()*100
-        avg = df.groupby('Mes_Num')['Retorno'].mean()*100*21
-        meses_dict = {1:'Ene',2:'Feb',3:'Mar',4:'Abr',5:'May',6:'Jun',7:'Jul',8:'Ago',9:'Sep',10:'Oct',11:'Nov',12:'Dic'}
-        # Fix V69: Validar índices
-        best = avg.idxmax(); worst = avg.idxmin()
-        return {"Heatmap": pivot, "Avg_Seasonality": avg, "Best_Month": meses_dict.get(best, str(best)), "Worst_Month": meses_dict.get(worst, str(worst))}
+        pe = info.get('trailingPE', 50); score_value = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
+        score_growth = 50 
+        curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
+        m = 0
+        if curr > s200: m += 50
+        if rsi > 50: m += (rsi - 50) * 2
+        score_mom = max(0, min(100, m))
+        score_qual = 50 
+        beta = info.get('beta', 1.5) or 1.0; score_vol = max(0, min(100, (2 - beta) * 100))
+        return {"Value": score_value, "Growth": score_growth, "Momentum": score_mom, "Quality": score_qual, "Low Vol": score_vol}
     except: return None
 
-def calcular_dcf_rapido(ticker):
-    if "USD" in ticker: return None
-    try:
-        i = yf.Ticker(ticker).info; fcf = i.get('freeCashflow', i.get('operatingCashflow', 0)*0.8)
-        if fcf <= 0: return None
-        pv = 0; g=0.1; w=0.09
-        for y in range(1, 6): pv += (fcf * ((1+g)**y)) / ((1+w)**y)
-        term = (fcf * ((1+g)**5) * 1.02) / (w - 0.02); pv_term = term / ((1+w)**5)
-        return (pv + pv_term) / i.get('sharesOutstanding', 1)
-    except: return None
+def dibujar_radar_factores(scores):
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=list(scores.values()), theta=list(scores.keys()), fill='toself', line_color='#00ff00', fillcolor='rgba(0, 255, 0, 0.2)'))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
+    return fig
 
 def graficar_simple(ticker):
     try:
@@ -215,47 +221,11 @@ def graficar_simple(ticker):
         fig.update_layout(template="plotly_dark", height=350, xaxis_rangeslider_visible=False, margin=dict(l=0,r=0,t=0,b=0)); return fig
     except: return None
 
-def obtener_consenso_analistas(ticker):
-    if "USD" in ticker: return None
-    try:
-        info = yf.Ticker(ticker).info
-        return {
-            "Recomendación": info.get('recommendationKey', 'N/A').upper(),
-            "Target Mean": info.get('targetMeanPrice', 0),
-            "Target High": info.get('targetHighPrice', 0),
-            "Precio Actual": info.get('currentPrice', 0)
-        }
-    except: return None
-
-@st.cache_data(ttl=600)
-def calcular_factores_quant_single(ticker):
-    try:
-        stock = yf.Ticker(ticker); df = stock.history(period="1y", interval="1d", auto_adjust=True); info = stock.info
-        if df.empty: return None
-        pe = info.get('trailingPE', 50); score_value = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
-        score_growth = 50 # Simplificado para velocidad
-        curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
-        m = 0
-        if curr > s200: m += 50
-        if rsi > 50: m += (rsi - 50) * 2
-        score_mom = max(0, min(100, m))
-        score_qual = 50 # Simplificado
-        beta = info.get('beta', 1.5) or 1.0; score_vol = max(0, min(100, (2 - beta) * 100))
-        return {"Value": score_value, "Growth": score_growth, "Momentum": score_mom, "Quality": score_qual, "Low Vol": score_vol}
-    except: return None
-
-def dibujar_radar_factores(scores):
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=list(scores.values()), theta=list(scores.keys()), fill='toself', line_color='#00ff00', fillcolor='rgba(0, 255, 0, 0.2)'))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
-    return fig
-
-# --- INTERFAZ V69 ---
+# --- INTERFAZ V70 ---
 c1, c2 = st.columns([3, 1])
-with c1: st.title("🛡️ Quant Terminal V69")
+with c1: st.title("📚 Quant Terminal V70: The CFO")
 with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
-# SNAPSHOT BLINDADO (V69)
 snap = obtener_datos_snapshot(sel_ticker)
 if snap:
     delta = ((snap['Precio'] - snap['Previo'])/snap['Previo'])*100
@@ -265,8 +235,6 @@ if snap:
     k3.metric("Vol", f"{snap['Volumen']/1e6:.1f}M")
     k4.metric("Beta", f"{snap['Beta']:.2f}")
     k5.metric("Target", f"${snap['Target']:.2f}")
-else:
-    st.warning("⚠️ Yahoo Finance está limitando las peticiones. Espera unos segundos.")
 
 st.divider()
 
@@ -277,32 +245,44 @@ with col_main:
     fig_chart = graficar_simple(sel_ticker)
     if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    tabs_detail = st.tabs(["📝 Tesis", "🔮 Predicción", "📅 Ciclos", "🧮 Valuación"])
+    # TABS DETALLE (V70: ESTADOS FINANCIEROS)
+    tabs_detail = st.tabs(["📚 Estados Financieros", "🔮 Predicción", "📝 Tesis"])
     
+    # --- PESTAÑA CFO (NUEVO V70) ---
     with tabs_detail[0]:
-        st.subheader("📝 Tesis Automática")
-        if snap:
-            hist_long = yf.Ticker(sel_ticker).history(period="1y") # Necesario para SMA200
-            if not hist_long.empty:
-                sma200 = ta.sma(hist_long['Close'], 200).iloc[-1]
-                dat_tec = {"RSI": snap['RSI'], "Precio": snap['Precio'], "SMA200": sma200}
-                dcf_val = calcular_dcf_rapido(sel_ticker)
-                dat_fund = {"Upside": ((dcf_val - snap['Precio'])/snap['Precio'])*100} if dcf_val else {}
-                pred = generar_proyeccion_futura(sel_ticker)
-                cycle = analizar_estacionalidad(sel_ticker)
+        st.subheader("📊 Análisis Fundamental Profundo")
+        
+        with st.spinner("Auditando libros contables..."):
+            fin_data = obtener_datos_financieros_profundos(sel_ticker)
+            
+            if fin_data:
+                # 1. Gráfico de Barras: Revenue vs Net Income
+                fig_fin = go.Figure()
+                fig_fin.add_trace(go.Bar(x=fin_data['Fechas'], y=fin_data['Ingresos'], name='Ventas (Revenue)', marker_color='#2196F3'))
+                fig_fin.add_trace(go.Bar(x=fin_data['Fechas'], y=fin_data['Net_Income'], name='Ganancia (Net Income)', marker_color='#4CAF50'))
+                fig_fin.update_layout(title="Evolución Ventas vs Ganancias (Anual)", barmode='group', template="plotly_dark", height=300)
+                st.plotly_chart(fig_fin, use_container_width=True)
                 
-                tesis = generar_tesis_automatica(sel_ticker, dat_tec, dat_fund, pred, cycle)
+                st.divider()
                 
-                st.markdown(f"<div class='thesis-card'><h2>VEREDICTO: {tesis['Veredicto']}</h2></div>", unsafe_allow_html=True)
-                c_p, c_c = st.columns(2)
-                with c_p:
-                    st.markdown("#### ✅ Bullish")
-                    for p in tesis['Pros']: st.markdown(f"- {p}")
-                with c_c:
-                    st.markdown("#### ❌ Bearish")
-                    for c in tesis['Contras']: st.markdown(f"- {c}")
-            else: st.info("Cargando historial largo...")
-        else: st.info("Esperando datos...")
+                # 2. Análisis DuPont
+                st.subheader("🧬 Desglose DuPont (ROE)")
+                dp = fin_data['DuPont']
+                
+                c_dup1, c_dup2, c_dup3, c_dup4 = st.columns(4)
+                c_dup1.metric("Margen Neto", f"{dp['Margen Neto']:.1f}%", help="Eficiencia Operativa (Ganancia/Ventas)")
+                c_dup2.metric("Rotación Activos", f"{dp['Rotación Activos']:.2f}x", help="Eficiencia de Activos (Ventas/Activos)")
+                c_dup3.metric("Apalancamiento", f"{dp['Apalancamiento']:.2f}x", help="Riesgo Financiero (Activos/Patrimonio)")
+                c_dup4.metric("ROE Final", f"{dp['ROE']:.1f}%", help="Retorno sobre Patrimonio")
+                
+                st.info(f"Fórmula: {dp['Margen Neto']:.1f}% x {dp['Rotación Activos']:.2f} x {dp['Apalancamiento']:.2f} = **{dp['ROE']:.1f}% ROE**")
+                
+                # 3. Tabla Raw
+                with st.expander("Ver Estado de Resultados Completo (Raw Data)"):
+                    st.dataframe(fin_data['Raw_Income'].style.format("${:,.0f}"), use_container_width=True)
+                    
+            else:
+                st.warning("Datos financieros detallados no disponibles (Posible Cripto o ETF).")
 
     with tabs_detail[1]:
         pred = generar_proyeccion_futura(sel_ticker)
@@ -315,15 +295,9 @@ with col_main:
             fig_fc.update_layout(template="plotly_dark", height=250, margin=dict(l=0,r=0,t=0,b=0)); st.plotly_chart(fig_fc, use_container_width=True)
 
     with tabs_detail[2]:
-        cycle = analizar_estacionalidad(sel_ticker)
-        if cycle:
-            st.write(f"Mejor Mes: **{cycle['Best_Month']}**")
-            st.plotly_chart(px.bar(x=cycle['Avg_Seasonality'].index, y=cycle['Avg_Seasonality'].values, title="Estacionalidad"), use_container_width=True)
-
-    with tabs_detail[3]:
-        dcf_val = calcular_dcf_rapido(sel_ticker)
-        if dcf_val and snap: st.metric("Valor Justo (DCF)", f"${dcf_val:.2f}", f"{((dcf_val-snap['Precio'])/snap['Precio'])*100:+.1f}% Upside")
-        else: st.info("Modelo no aplicable.")
+        if st.button("🤖 Generar Tesis IA"):
+            try: st.write(model.generate_content(f"Tesis de inversion para {sel_ticker} considerando fundamentales y tecnicos").text)
+            except: st.error("Sin IA")
 
 with col_side:
     st.subheader("🧬 Perfil Quant")
@@ -335,12 +309,10 @@ with col_side:
         q_qty = st.number_input("Cantidad", 1, 1000, 10); q_side = st.selectbox("Lado", ["COMPRA", "VENTA"])
         if st.form_submit_button("EJECUTAR"): 
             if snap: registrar_operacion_sql(sel_ticker, q_side, q_qty, snap['Precio']); st.success("Orden Enviada!")
-            else: st.error("Espera a que cargue el precio.")
         
     st.markdown("---")
-    st.subheader("🏆 Ranking Mercado")
+    st.subheader("🏆 Ranking")
     if st.button("🔄 ESCANEAR"):
-        st.info("Escaneando... (Esto tardará unos segundos para respetar límites)")
         st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)
         
     st.markdown("---")
