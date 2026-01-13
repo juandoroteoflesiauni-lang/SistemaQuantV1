@@ -19,12 +19,14 @@ import google.generativeai as genai
 
 # --- CONFIGURACIÓN ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Sistema Quant V64 (The Hunter)", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="Sistema Quant V65 (Consensus)", layout="wide", page_icon="👥")
 
 st.markdown("""<style>
     .metric-card {background-color: #0e1117; border: 1px solid #333; border-radius: 5px; padding: 10px; text-align: center;}
-    .winner-card {background-color: #1b261b; border: 2px solid #00ff00; border-radius: 10px; padding: 15px; text-align: center;}
-    .category-badge {background-color: #333; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; margin-right: 5px;}
+    .consensus-card {background-color: #1e2a38; border: 1px solid #2196F3; border-radius: 8px; padding: 15px; text-align: center;}
+    .rec-buy {color: #00ff00; font-weight: bold;}
+    .rec-hold {color: #ffa500; font-weight: bold;}
+    .rec-sell {color: #ff0000; font-weight: bold;}
     .stTabs [data-baseweb="tab-list"] {gap: 5px;}
     .stTabs [data-baseweb="tab"] {height: 40px; padding: 5px 15px; font-size: 14px;}
 </style>""", unsafe_allow_html=True)
@@ -78,80 +80,72 @@ def auditar_posiciones_sql():
 
 init_db()
 
-# --- MOTOR DE RANKING MASIVO (NUEVO V64) ---
-@st.cache_data(ttl=900) # Cache 15 min para no saturar
-def escanear_mercado_completo(tickers):
-    """Ejecuta el análisis de Factores en TODOS los activos y devuelve un ranking"""
-    ranking = []
+# --- MOTOR DE CONSENSO (NUEVO V65) ---
+@st.cache_data(ttl=3600)
+def obtener_consenso_analistas(ticker):
+    """Extrae recomendaciones y precios objetivos de analistas"""
+    if "USD" in ticker and "BTC" not in ticker: return None # Filtro básico para cryptos no principales
     
-    # Descarga Masiva (Más eficiente)
     try:
-        data_hist = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
-    except: return pd.DataFrame()
-
-    for t in tickers:
-        try:
-            # Extraer Datos
-            if len(tickers) > 1: 
-                df = data_hist[t].dropna()
-                # Para datos fundamentales (info), lamentablemente yfinance requiere llamadas individuales
-                # Optimizamos llamando solo lo esencial o usando un try-except rápido
-                info = yf.Ticker(t).info 
-            else:
-                df = data_hist.dropna()
-                info = yf.Ticker(t).info
-
-            if df.empty: continue
-
-            # --- CÁLCULO DE FACTORES (V63 Lógica) ---
-            # 1. VALUE
-            pe = info.get('trailingPE', 50)
-            score_value = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
-            
-            # 2. GROWTH
-            rev_growth = info.get('revenueGrowth', 0) * 100
-            score_growth = max(0, min(100, rev_growth * 3.3))
-            
-            # 3. MOMENTUM
-            curr = df['Close'].iloc[-1]
-            sma200 = df['Close'].rolling(200).mean().iloc[-1]
-            rsi = ta.rsi(df['Close'], 14).iloc[-1]
-            m_score = 0
-            if curr > sma200: m_score += 50
-            if rsi > 50: m_score += (rsi - 50) * 2
-            score_momentum = max(0, min(100, m_score))
-            
-            # 4. QUALITY
-            roe = info.get('returnOnEquity', 0) * 100
-            margins = info.get('profitMargins', 0) * 100
-            score_quality = max(0, min(100, (roe * 2) + margins))
-            
-            # 5. TOTAL SCORE
-            total_score = (score_value * 0.2) + (score_growth * 0.2) + (score_momentum * 0.3) + (score_quality * 0.3)
-            
-            # Ajuste Cripto (Si no tiene PE, asumimos Value Neutral)
-            if "USD" in t:
-                total_score = (score_momentum * 0.6) + (score_growth * 0.4) # Cripto es Momentum + Growth
-            
-            ranking.append({
-                "Ticker": t,
-                "Score": round(total_score, 1),
-                "Precio": curr,
-                "Value": round(score_value, 0),
-                "Growth": round(score_growth, 0),
-                "Momentum": round(score_momentum, 0),
-                "Quality": round(score_quality, 0)
-            })
-            
-        except: pass
+        stock = yf.Ticker(ticker)
+        info = stock.info
         
-    return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
+        # 1. Recomendación (1-5)
+        # 1=Strong Buy, 2=Buy, 3=Hold, 4=Sell, 5=Strong Sell
+        rec_mean = info.get('recommendationMean')
+        rec_key = info.get('recommendationKey', 'none').upper().replace('_', ' ')
+        
+        # 2. Precios Objetivo
+        target_low = info.get('targetLowPrice')
+        target_mean = info.get('targetMeanPrice')
+        target_high = info.get('targetHighPrice')
+        current = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+        
+        if not target_mean or not current: return None
+        
+        upside = ((target_mean - current) / current) * 100
+        num_analysts = info.get('numberOfAnalystOpinions', 0)
+        
+        return {
+            "Recomendación": rec_key,
+            "Score": rec_mean,
+            "Target Low": target_low,
+            "Target Mean": target_mean,
+            "Target High": target_high,
+            "Precio Actual": current,
+            "Upside %": upside,
+            "Analistas": num_analysts
+        }
+    except: return None
 
 # --- MOTORES DE SOPORTE ---
+@st.cache_data(ttl=900)
+def escanear_mercado_completo(tickers):
+    ranking = []
+    try: data_hist = yf.download(" ".join(tickers), period="1y", group_by='ticker', progress=False, auto_adjust=True)
+    except: return pd.DataFrame()
+    for t in tickers:
+        try:
+            df = data_hist[t].dropna() if len(tickers)>1 else data_hist.dropna()
+            info = yf.Ticker(t).info
+            if df.empty: continue
+            pe = info.get('trailingPE', 50); val = max(0, min(100, (60 - pe) * 2)) if pe > 0 else 0
+            rev = info.get('revenueGrowth', 0) * 100; gro = max(0, min(100, rev * 3.3))
+            curr = df['Close'].iloc[-1]; s200 = df['Close'].rolling(200).mean().iloc[-1]; rsi = ta.rsi(df['Close'], 14).iloc[-1]
+            mom = 0
+            if curr > s200: mom += 50
+            if rsi > 50: mom += (rsi - 50) * 2
+            mom = max(0, min(100, mom))
+            roe = info.get('returnOnEquity', 0) * 100; mar = info.get('profitMargins', 0) * 100; qua = max(0, min(100, (roe * 2) + mar))
+            score = (val * 0.2) + (gro * 0.2) + (mom * 0.3) + (qua * 0.3)
+            if "USD" in t: score = (mom * 0.6) + (gro * 0.4)
+            ranking.append({"Ticker": t, "Score": round(score, 1), "Precio": curr, "Value": round(val,0), "Momentum": round(mom,0)})
+        except: pass
+    return pd.DataFrame(ranking).sort_values(by="Score", ascending=False)
+
 def dibujar_radar_factores(scores):
-    categories = list(scores.keys()); values = list(scores.values())
     fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(r=values, theta=categories, fill='toself', line_color='#00ff00', fillcolor='rgba(0, 255, 0, 0.2)'))
+    fig.add_trace(go.Scatterpolar(r=list(scores.values()), theta=list(scores.keys()), fill='toself', line_color='#00ff00', fillcolor='rgba(0, 255, 0, 0.2)'))
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], color='grey')), showlegend=False, paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=300, margin=dict(l=40, r=40, t=20, b=20))
     return fig
 
@@ -195,120 +189,95 @@ def calcular_factores_quant_single(ticker):
         return {"Value": score_value, "Growth": score_growth, "Momentum": score_mom, "Quality": score_qual, "Low Vol": score_vol}
     except: return None
 
-# --- INTERFAZ V64: THE HUNTER ---
-st.title("🏆 Sistema Quant V64: The Hunter")
+# --- INTERFAZ V65 ---
+c1, c2 = st.columns([3, 1])
+with c1: st.title("🖥️ Quant Terminal V65")
+with c2: sel_ticker = st.selectbox("ACTIVO PRINCIPAL", WATCHLIST)
 
-# TABS PRINCIPALES
-main_tabs = st.tabs(["🏆 RANKING DE MERCADO", "🖥️ TERMINAL INDIVIDUAL", "💼 PORTAFOLIO"])
+stock = yf.Ticker(sel_ticker); hist = stock.history(period="2d"); info = stock.info
+if not hist.empty:
+    curr = hist['Close'].iloc[-1]; prev = hist['Close'].iloc[-2]; delta = ((curr - prev) / prev) * 100
+    col_k1, col_k2, col_k3, col_k4, col_k5 = st.columns(5)
+    col_k1.metric("Precio", f"${curr:.2f}", f"{delta:+.2f}%")
+    col_k2.metric("RSI (14)", f"{ta.rsi(stock.history(period='30d')['Close'], 14).iloc[-1]:.0f}")
+    col_k3.metric("Volumen", f"{info.get('volume', 0)/1e6:.1f}M")
+    col_k4.metric("Beta", f"{info.get('beta', 1.0):.2f}")
+    col_k5.metric("Target (Consenso)", f"${info.get('targetMeanPrice', 0):.2f}")
 
-# --- TAB 1: RANKING MASIVO (NUEVO V64) ---
-with main_tabs[0]:
-    st.subheader("📡 Escáner de Oportunidades en Tiempo Real")
-    st.caption("Ranking basado en modelo multifactorial (Value + Growth + Momentum + Quality)")
+st.divider()
+
+col_main, col_side = st.columns([2, 1])
+
+with col_main:
+    st.subheader("📉 Acción del Precio")
+    fig_chart = graficar_simple(sel_ticker)
+    if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
     
-    if st.button("🔄 ESCANEAR MERCADO AHORA"):
-        with st.spinner("Analizando fundamentales y técnicos de toda la lista... (Esto puede tomar unos segundos)"):
-            df_rank = escanear_mercado_completo(WATCHLIST)
-            st.session_state['ranking'] = df_rank
+    # TABS DETALLE (V65)
+    tabs_detail = st.tabs(["👥 Consenso", "🧮 Valuación (DCF)", "📰 Noticias"])
     
-    if 'ranking' in st.session_state and not st.session_state['ranking'].empty:
-        df_r = st.session_state['ranking']
-        
-        # 1. PODIO DE GANADORES
-        top_1 = df_r.iloc[0]
-        top_value = df_r.sort_values("Value", ascending=False).iloc[0]
-        top_mom = df_r.sort_values("Momentum", ascending=False).iloc[0]
-        
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown(f"<div class='winner-card'><h3>🏆 #1 GENERAL</h3><h1>{top_1['Ticker']}</h1><p>Score: {top_1['Score']}</p></div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"<div class='metric-card'><h3>💎 TOP VALUE</h3><h2>{top_value['Ticker']}</h2><p>Score Val: {top_value['Value']}</p></div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"<div class='metric-card'><h3>🚀 TOP MOMENTUM</h3><h2>{top_mom['Ticker']}</h2><p>Score Mom: {top_mom['Momentum']}</p></div>", unsafe_allow_html=True)
-        
-        st.divider()
-        
-        # 2. TABLA DE CLASIFICACIÓN
-        st.subheader("📊 Tabla de Clasificación Completa")
-        
-        # Formato de color para la tabla
-        def color_score(val):
-            color = 'green' if val > 70 else 'orange' if val > 40 else 'red'
-            return f'color: {color}; font-weight: bold'
+    # 1. CONSENSO ANALISTAS (NUEVO V65)
+    with tabs_detail[0]:
+        cons = obtener_consenso_analistas(sel_ticker)
+        if cons:
+            c_c1, c_c2 = st.columns([1, 2])
             
-        st.dataframe(
-            df_r.style.map(color_score, subset=['Score'])
-            .bar(subset=['Value'], color='#4CAF50')
-            .bar(subset=['Momentum'], color='#2196F3'),
-            use_container_width=True,
-            column_config={
-                "Ticker": "Activo",
-                "Score": st.column_config.ProgressColumn("Quant Score", format="%.1f", min_value=0, max_value=100),
-                "Precio": st.column_config.NumberColumn("Precio", format="$%.2f")
-            }
-        )
-        
-        # 3. MATRIZ DE OPORTUNIDAD (SCATTER)
-        st.subheader("🎯 Matriz de Selección: Calidad vs Momentum")
-        fig_scatter = px.scatter(df_r, x="Quality", y="Momentum", color="Score", size="Score", text="Ticker",
-                                 title="Busca activos en la esquina superior derecha (Alta Calidad + Fuerte Tendencia)",
-                                 color_continuous_scale="Viridis")
-        fig_scatter.add_hline(y=50, line_dash="dash", line_color="grey")
-        fig_scatter.add_vline(x=50, line_dash="dash", line_color="grey")
-        st.plotly_chart(fig_scatter, use_container_width=True)
-        
-    else:
-        st.info("Dale al botón 'ESCANEAR' para generar el ranking.")
+            with c_c1:
+                rec_text = cons['Recomendación']
+                color_rec = "rec-buy" if "BUY" in rec_text else "rec-sell" if "SELL" in rec_text else "rec-hold"
+                
+                st.markdown(f"""
+                <div class='consensus-card'>
+                    <h4 style='color:#ccc'>Recomendación</h4>
+                    <h2 class='{color_rec}'>{rec_text}</h2>
+                    <p>Score: {cons['Score']:.1f} (1=Buy, 5=Sell)</p>
+                    <small>Basado en {cons['Analistas']} Analistas</small>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with c_c2:
+                # Gráfico de Target Price
+                fig_target = go.Figure()
+                # Precio actual
+                fig_target.add_trace(go.Scatter(x=[1], y=[cons['Precio Actual']], mode='markers+text', marker=dict(size=15, color='white'), text=["Actual"], textposition="bottom center", name="Actual"))
+                # Rangos
+                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target Low']], name='Low', marker_color='red', opacity=0.3))
+                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target Mean'] - cons['Target Low']], base=cons['Target Low'], name='Mean', marker_color='yellow', opacity=0.3))
+                fig_target.add_trace(go.Bar(x=[1], y=[cons['Target High'] - cons['Target Mean']], base=cons['Target Mean'], name='High', marker_color='green', opacity=0.3))
+                
+                fig_target.update_layout(title=f"Objetivos de Precio (Upside: {cons['Upside %']:.1f}%)", barmode='stack', showlegend=False, xaxis=dict(visible=False), paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color='white'), height=200, margin=dict(l=10, r=10, t=30, b=10))
+                st.plotly_chart(fig_target, use_container_width=True)
+        else:
+            st.info("Datos de consenso no disponibles para este activo.")
 
-# --- TAB 2: TERMINAL INDIVIDUAL (V63) ---
-with main_tabs[1]:
-    c_sel, c_res = st.columns([1, 3])
-    with c_sel:
-        sel_ticker = st.selectbox("ACTIVO:", WATCHLIST)
-        stock = yf.Ticker(sel_ticker); hist = stock.history(period="2d")
-        if not hist.empty:
-            curr = hist['Close'].iloc[-1]; delta = ((curr - hist['Close'].iloc[-2])/hist['Close'].iloc[-2])*100
-            st.metric("Precio", f"${curr:.2f}", f"{delta:+.2f}%")
-            
-    with c_res:
-        st.subheader(f"Análisis Profundo: {sel_ticker}")
-        c_main, c_side = st.columns([2, 1])
-        with c_main:
-            fig_chart = graficar_simple(sel_ticker)
-            if fig_chart: st.plotly_chart(fig_chart, use_container_width=True)
-        with c_side:
-            factores = calcular_factores_quant_single(sel_ticker)
-            if factores: st.plotly_chart(dibujar_radar_factores(factores), use_container_width=True)
-            
-        # PESTAÑAS DETALLE
-        sub_t = st.tabs(["🧮 DCF", "🤖 IA"])
-        with sub_t[0]:
-            dcf = calcular_dcf_rapido(sel_ticker)
-            if dcf: st.metric("Valor Justo DCF", f"${dcf:.2f}", f"{((dcf-curr)/curr)*100:+.1f}%")
-            else: st.warning("DCF no disponible.")
-        with sub_t[1]:
-            if st.button("Analizar con Gemini"):
-                with st.spinner("Pensando..."):
-                    try: st.write(model.generate_content(f"Analisis breve de {sel_ticker} hoy").text)
-                    except: st.error("Sin conexión IA")
+    with tabs_detail[1]:
+        dcf_val = calcular_dcf_rapido(sel_ticker)
+        if dcf_val: st.metric("Valor Intrínseco (Modelo DCF)", f"${dcf_val:.2f}", f"{((dcf_val-curr)/curr)*100:+.1f}% Upside")
+        else: st.warning("DCF no aplica.")
+        
+    with tabs_detail[2]:
+        if st.button("🤖 Analizar Noticias"):
+            with st.spinner("Leyendo..."):
+                try: st.write(model.generate_content(f"Analisis breve de {sel_ticker} hoy").text)
+                except: st.error("Sin conexión IA")
 
-# --- TAB 3: PORTAFOLIO ---
-with main_tabs[2]:
-    st.subheader("💼 Gestión de Cartera")
-    df_p = auditar_posiciones_sql()
-    if not df_p.empty:
-        st.dataframe(df_p.style.format({"Valor": "${:.2f}", "P&L": "${:+.2f}"}), use_container_width=True)
-    else: st.info("Sin posiciones.")
+with col_side:
+    st.subheader("🧬 Perfil Quant")
+    factores = calcular_factores_quant_single(sel_ticker)
+    if factores:
+        st.plotly_chart(dibujar_radar_factores(factores), use_container_width=True)
+        st.write(f"**💎 Quality:** {factores['Quality']}")
+        st.write(f"**🚀 Momentum:** {factores['Momentum']}")
+        st.write(f"**🏷️ Value:** {factores['Value']}")
     
-    with st.expander("📝 Nueva Orden"):
-        with st.form("quick_order"):
-            q_qty = st.number_input("Cantidad", 1, 1000, 10)
-            q_side = st.selectbox("Lado", ["COMPRA", "VENTA"])
-            if st.form_submit_button("EJECUTAR"):
-                # Necesitamos precio actual para registrar
-                try: px_now = yf.Ticker(sel_ticker).history(period='1d')['Close'].iloc[-1]
-                except: px_now = 0
-                registrar_operacion_sql(sel_ticker, q_side, q_qty, px_now)
-                st.success("Orden Registrada")
-                st.rerun()
+    st.markdown("---")
+    st.subheader("⚡ Quick Trade")
+    with st.form("quick_order"):
+        q_qty = st.number_input("Cantidad", 1, 1000, 10); q_side = st.selectbox("Lado", ["COMPRA", "VENTA"])
+        if st.form_submit_button("EJECUTAR"):
+            registrar_operacion_sql(sel_ticker, q_side, q_qty, curr); st.success("Orden Enviada!")
+
+st.markdown("---")
+st.subheader("🏆 Ranking de Mercado")
+if st.button("🔄 ESCANEAR"):
+    st.dataframe(escanear_mercado_completo(WATCHLIST), use_container_width=True)s
